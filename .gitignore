@@ -1,0 +1,11 @@
+bin/
+obj/
+publish/
+.vs/
+.idea/
+*.user
+*.suo
+
+
+build/
+*.zip
