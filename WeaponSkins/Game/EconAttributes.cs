@@ -26,7 +26,10 @@ public static class EconAttributes
 
 	public static void Set(CAttributeList list, string attribute, float value)
 	{
-		setAttribute?.Invoke(list.Handle, attribute, value);
+		if (setAttribute == null || list.Handle == IntPtr.Zero || string.IsNullOrEmpty(attribute))
+			return;
+
+		setAttribute.Invoke(list.Handle, attribute, value);
 	}
 
 	public static float AsFloat(int value)
@@ -36,6 +39,9 @@ public static class EconAttributes
 
 	public static void MarkCustom(CEconItemView item, ulong steamId)
 	{
+		if (item.Handle == IntPtr.Zero)
+			return;
+
 		var itemId = (ulong)Interlocked.Increment(ref nextItemId);
 		item.ItemID = itemId;
 		item.ItemIDLow = (uint)(itemId & 0xFFFFFFFF);

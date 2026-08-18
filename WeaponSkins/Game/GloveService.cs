@@ -147,13 +147,19 @@ public sealed class GloveService
 		uint pawnHandle,
 		bool renewIdentity)
 	{
+		if (!pawn.IsValid)
+			return;
+
+		var item = pawn.EconGloves;
+		if (item.Handle == IntPtr.Zero)
+			return;
+
 		var newPawn = !states.TryGetValue(player.Slot, out var state) ||
 			state.SteamId != player.SteamID || state.PawnHandle != pawnHandle;
 
 		if (newPawn)
 			states[player.Slot] = new GloveState(player.SteamID, pawnHandle);
 
-		var item = pawn.EconGloves;
 		if (renewIdentity || newPawn)
 			EconAttributes.MarkCustom(item, player.SteamID);
 
@@ -176,6 +182,9 @@ public sealed class GloveService
 
 	private static void ClearItem(CEconItemView item)
 	{
+		if (item.Handle == IntPtr.Zero)
+			return;
+
 		item.ItemDefinitionIndex = 0;
 		item.ItemID = 0;
 		item.ItemIDLow = 0;

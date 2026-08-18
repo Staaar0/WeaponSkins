@@ -48,12 +48,18 @@ public sealed class WeaponApplier
 
 	public void Apply(CCSPlayerController player, CBasePlayerWeapon weapon)
 	{
+		if (!weapon.IsValid)
+			return;
+
 		var loadout = cache.Get(player);
 		if (loadout == null)
 			return;
 
 		var side = loadout.For(player.Team);
 		var item = weapon.AttributeManager.Item;
+		if (item.Handle == IntPtr.Zero)
+			return;
+
 		var defIndex = (int)item.ItemDefinitionIndex;
 		var isKnife = KnifeService.IsKnifeClass(weapon.DesignerName);
 
