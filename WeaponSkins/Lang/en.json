@@ -75,7 +75,7 @@
  "gen_too_long": "The code is too long use console with {gold}css_g",
  "gen_invalid": "That code could not be read",
  "gen_unknown_item": "That code points to an item the server does not recognize",
- "gen_stickers_stripped": "Stickers and charms were skipped, they are a VIP feature",
+ "gen_stickers_stripped": "Stickers and charms were skipped, They are disabled on this server",
  "gen_vip_only": "Applying codes is a {gold}VIP{default} feature",
  "no_access": "You do not have access to that command",
  "reloading": "Reloading item data...",

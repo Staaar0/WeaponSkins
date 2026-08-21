@@ -762,7 +762,7 @@ public sealed class SkinMenus
 		loadout.MusicKit = kit?.Id ?? 0;
 		plugin.Save(Store.SaveMusic(player.SteamID, loadout.MusicKit));
 
-		plugin.Profile.ApplyMusic(player);
+		plugin.Profile.Schedule(player);
 		plugin.Reply(player, "music_set", kit?.Name ?? plugin.Text("menu.default"));
 		Renderer.Rebuild(player, session);
 	}
@@ -807,7 +807,7 @@ public sealed class SkinMenus
 		loadout.Pin = pin?.Id ?? 0;
 		plugin.Save(Store.SavePin(player.SteamID, loadout.Pin));
 
-		plugin.Profile.ApplyPin(player);
+		plugin.Profile.Schedule(player);
 		plugin.Reply(player, "pin_set", pin?.Name ?? plugin.Text("menu.default"));
 		Renderer.Rebuild(player, session);
 	}
@@ -890,6 +890,9 @@ public sealed class SkinMenus
 	public void Prewarm()
 	{
 		if (!Catalog.Loaded)
+			return;
+
+		if (!plugin.Config.Stickers.Enabled)
 			return;
 
 		lock (stickerCacheSync)

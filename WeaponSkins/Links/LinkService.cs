@@ -41,7 +41,7 @@ public sealed class LinkService
 
 	public void Start()
 	{
-		if (!plugin.Db.Configured || loop != null)
+		if (!Required || loop != null)
 			return;
 
 		cancellation = new CancellationTokenSource();

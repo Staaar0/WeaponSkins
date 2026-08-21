@@ -11,6 +11,9 @@ public sealed class CatalogService
 	public IReadOnlyList<string> Categories { get; private set; } = [];
 	public IReadOnlyDictionary<string, List<WeaponDef>> WeaponsByCategory { get; private set; } = new Dictionary<string, List<WeaponDef>>();
 	public IReadOnlyDictionary<int, List<PaintDef>> Paints { get; private set; } = new Dictionary<int, List<PaintDef>>();
+
+	private IReadOnlyDictionary<(int DefIndex, int Paint), PaintDef> paintIndex =
+		new Dictionary<(int, int), PaintDef>();
 	public IReadOnlyList<KnifeDef> Knives { get; private set; } = [];
 	public IReadOnlyList<GloveDef> Gloves { get; private set; } = [];
 	public IReadOnlyList<StickerDef> Stickers { get; private set; } = [];
@@ -45,9 +48,7 @@ public sealed class CatalogService
 
 	public PaintDef? FindPaint(int defIndex, int paint)
 	{
-		if (!Paints.TryGetValue(defIndex, out var list))
-			return null;
-		return list.Find(p => p.Paint == paint);
+		return paintIndex.TryGetValue((defIndex, paint), out var found) ? found : null;
 	}
 
 	public string WeaponName(int defIndex) => WeaponNames.TryGetValue(defIndex, out var name) ? name : $"#{defIndex}";
@@ -235,7 +236,13 @@ public sealed class CatalogService
 			foreach (var (defIndex, name) in gloves)
 				names[defIndex] = name;
 
+			var index = new Dictionary<(int, int), PaintDef>();
+			foreach (var (defIndex, list) in paints)
+				foreach (var paint in list)
+					index[(defIndex, paint.Paint)] = paint;
+
 			Paints = paints;
+			paintIndex = index;
 			WeaponsByCategory = byCategory;
 			Categories = order.Where(byCategory.ContainsKey).Concat(byCategory.Keys.Where(c => !order.Contains(c)).Order()).ToList();
 			Knives = knives.Select(k => new KnifeDef(k.Key, k.Value)).OrderBy(k => k.Name).ToList();

@@ -1,18 +1,49 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Timers;
 
 namespace WeaponSkins;
 
 public sealed class ProfileService
 {
+	private static readonly float[] DefaultRetries = [0.25f, 1f, 3f, 5f];
+
+	private const float ReassertSeconds = 5f;
+
+	private readonly WeaponSkins plugin;
 	private readonly PlayerCache cache;
 	private readonly Dictionary<int, ushort> originalMusic = [];
 	private readonly Dictionary<int, MedalRank_t> originalPin = [];
 	private readonly Dictionary<int, int> agentRevisions = [];
+	private readonly Dictionary<int, int> profileRevisions = [];
+	private bool reassertStarted;
 
-	public ProfileService(PlayerCache cache)
+	public ProfileService(WeaponSkins plugin, PlayerCache cache)
 	{
+		this.plugin = plugin;
 		this.cache = cache;
+	}
+
+	public void Start()
+	{
+		if (reassertStarted)
+			return;
+
+		reassertStarted = true;
+		plugin.AddTimer(ReassertSeconds, () =>
+		{
+			if (plugin.Stopping)
+				return;
+
+			foreach (var player in Utilities.GetPlayers())
+			{
+				if (!player.IsValid || player.IsBot || player.SteamID == 0 || !NeedsProfile(player))
+					continue;
+
+				ApplyMusic(player);
+				ApplyPin(player);
+			}
+		}, TimerFlags.REPEAT);
 	}
 
 	public void Drop(int slot)
@@ -20,6 +51,46 @@ public sealed class ProfileService
 		originalMusic.Remove(slot);
 		originalPin.Remove(slot);
 		agentRevisions[slot] = agentRevisions.GetValueOrDefault(slot) + 1;
+		profileRevisions[slot] = profileRevisions.GetValueOrDefault(slot) + 1;
+	}
+
+	public void DropAll()
+	{
+		foreach (var slot in profileRevisions.Keys.ToList())
+			profileRevisions[slot] = profileRevisions[slot] + 1;
+	}
+
+	public void Schedule(CCSPlayerController player, params float[] delays)
+	{
+		if (!player.IsValid || player.IsBot)
+			return;
+
+		var slot = player.Slot;
+		var steamId = player.SteamID;
+		var revision = profileRevisions.GetValueOrDefault(slot) + 1;
+		profileRevisions[slot] = revision;
+
+		ApplyMusic(player);
+		ApplyPin(player);
+
+		foreach (var delay in delays.Length > 0 ? delays : DefaultRetries)
+		{
+			plugin.AddTimer(delay, () =>
+			{
+				if (profileRevisions.GetValueOrDefault(slot) != revision)
+					return;
+
+				var current = Utilities.GetPlayerFromSlot(slot);
+				if (current == null || !current.IsValid || current.IsBot || current.SteamID != steamId)
+					return;
+
+				if (!NeedsProfile(current))
+					return;
+
+				ApplyMusic(current);
+				ApplyPin(current);
+			}, TimerFlags.STOP_ON_MAPCHANGE);
+		}
 	}
 
 	public void ApplyAgent(CCSPlayerController player)

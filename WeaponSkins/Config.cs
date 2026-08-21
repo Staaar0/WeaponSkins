@@ -69,7 +69,7 @@ public class DatabaseConfig
 public class AgentsConfig
 {
 	[JsonPropertyName("change_cooldown")]
-	public int ChangeCooldown { get; set; } = 10;
+	public int ChangeCooldown { get; set; } = 5;
 }
 
 public class StickersConfig
@@ -96,7 +96,7 @@ public class MenuConfig
 	public bool ShowImage { get; set; } = true;
 
 	[JsonPropertyName("image_seconds")]
-	public float ImageSeconds { get; set; } = 1f;
+	public float ImageSeconds { get; set; } = 2f;
 }
 
 public class CommandsConfig

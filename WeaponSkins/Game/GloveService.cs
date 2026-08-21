@@ -42,13 +42,16 @@ public sealed class GloveService
 		if (playerRef == null || loadout == null || !EconAttributes.Available)
 			return;
 
-		var side = loadout.For(player.Team);
-		if (side.GloveDef <= 0 || side.GlovePaint <= 0)
-			return;
-
 		var pawn = player.PlayerPawn.Value;
 		if (pawn == null || !pawn.IsValid)
 			return;
+
+		var side = loadout.For(player.Team);
+		if (side.GloveDef <= 0 || side.GlovePaint <= 0)
+		{
+			ClearGloves(pawn);
+			return;
+		}
 
 		if (!draw)
 		{
@@ -126,7 +129,10 @@ public sealed class GloveService
 
 			var currentSide = currentLoadout.For(current.Team);
 			if (currentSide.GloveDef <= 0 || currentSide.GlovePaint <= 0)
+			{
+				ClearGloves(alivePawn);
 				return;
+			}
 
 			ApplyItem(current, alivePawn, currentSide, alivePawn.EntityHandle.Raw, false);
 			MarkChanged(alivePawn);
@@ -178,6 +184,21 @@ public sealed class GloveService
 		EconAttributes.Set(item.AttributeList, "set item texture wear", side.Gloves.Wear);
 
 		item.Initialized = true;
+	}
+
+	private static void ClearGloves(CCSPlayerPawn pawn)
+	{
+		if (!pawn.IsValid)
+			return;
+
+		var item = pawn.EconGloves;
+		if (item.Handle == IntPtr.Zero || item.ItemDefinitionIndex == 0)
+			return;
+
+		ClearItem(item);
+		MarkChanged(pawn);
+		pawn.AcceptInput("SetBodygroup", value: "default_gloves,0");
+		pawn.AcceptInput("SetBodygroup", value: "first_or_third_person,0");
 	}
 
 	private static void ClearItem(CEconItemView item)

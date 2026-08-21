@@ -15,9 +15,11 @@ public sealed class Events
 	private readonly WeaponSkins plugin;
 	private readonly Dictionary<int, ulong> steamIdsBySlot = [];
 	private readonly Dictionary<int, int> pendingInventoryApplies = [];
-	private int profileResyncRevision;
+	private readonly Dictionary<int, long> spawnTicks = [];
 	private int worldGeneration;
 	private bool registered;
+
+	private const long SpawnTeamWindowMs = 2000;
 
 	public Events(WeaponSkins plugin)
 	{
@@ -40,6 +42,7 @@ public sealed class Events
 		plugin.RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
 		plugin.RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
 		plugin.RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath);
+		plugin.RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
 		plugin.RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
 		plugin.RegisterEventHandler<EventItemPickup>(OnItemPickup);
 		plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
@@ -59,7 +62,8 @@ public sealed class Events
 		plugin.Cache.LoadoutReady -= OnLoadoutReady;
 		steamIdsBySlot.Clear();
 		pendingInventoryApplies.Clear();
-		profileResyncRevision++;
+		spawnTicks.Clear();
+		plugin.Profile.DropAll();
 		registered = false;
 	}
 
@@ -73,28 +77,20 @@ public sealed class Events
 			if (weapon == null || !weapon.IsValid)
 				return HookResult.Continue;
 
-			var owner = PlayerFromItemServices(hook.GetParam<CCSPlayer_ItemServices>(0));
-			if (owner != null)
-				plugin.Applier.Apply(owner, weapon);
-
 			var weaponHandle = weapon.EntityHandle.Raw;
-			Server.NextWorldUpdate(() => ApplyByHandle(weaponHandle));
+			var generation = worldGeneration;
+			Server.NextWorldUpdate(() =>
+			{
+				if (!plugin.Stopping && generation == worldGeneration)
+					ApplyByHandle(weaponHandle);
+			});
 		}
-		catch
+		catch (Exception ex)
 		{
+			plugin.Logger.LogError(ex, "OnGiveNamedItem failed");
 		}
 
 		return HookResult.Continue;
-	}
-
-	private static CCSPlayerController? PlayerFromItemServices(CCSPlayer_ItemServices services)
-	{
-		if (services.Pawn.Value is not { IsValid: true } pawn ||
-			pawn.Controller.Value is not { IsValid: true } controller)
-			return null;
-
-		var player = new CCSPlayerController(controller.Handle);
-		return player.IsValid && !player.IsBot ? player : null;
 	}
 
 	private void ApplyByHandle(uint weaponHandle)
@@ -107,8 +103,16 @@ public sealed class Events
 			return;
 
 		var player = ResolveOwner(weapon);
-		if (player != null)
-			plugin.Applier.Apply(player, weapon);
+		if (player == null)
+			return;
+
+		plugin.Applier.Apply(player, weapon);
+
+		if (plugin.Applier.IsRefreshing(player.Slot) ||
+			Environment.TickCount64 - spawnTicks.GetValueOrDefault(player.Slot) < SpawnTeamWindowMs)
+			return;
+
+		plugin.Applier.SyncSpawnViewModel(player);
 	}
 
 	private static CCSPlayerController? ResolveOwner(CBasePlayerWeapon weapon)
@@ -142,6 +146,7 @@ public sealed class Events
 		plugin.Applier.AdvanceLife(player.Slot);
 		plugin.Profile.ApplyAgent(player);
 		steamIdsBySlot[player.Slot] = player.SteamID;
+		spawnTicks[player.Slot] = Environment.TickCount64;
 		plugin.Profile.ApplyMusic(player);
 		plugin.Profile.ApplyPin(player);
 		plugin.GloveApply.Drop(player.Slot);
@@ -169,6 +174,47 @@ public sealed class Events
 
 			plugin.Profile.ApplyAgent(current);
 		}, TimerFlags.STOP_ON_MAPCHANGE);
+
+		return HookResult.Continue;
+	}
+
+	private HookResult OnPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
+	{
+		var player = @event.Userid;
+		if (player == null || !player.IsValid || player.IsBot || player.SteamID == 0)
+			return HookResult.Continue;
+
+		var slot = player.Slot;
+		var steamId = player.SteamID;
+		var generation = worldGeneration;
+
+		Server.NextFrame(() =>
+		{
+			if (plugin.Stopping || generation != worldGeneration)
+				return;
+
+			var current = Utilities.GetPlayerFromSlot(slot);
+			if (current == null || !current.IsValid || current.IsBot || current.SteamID != steamId)
+				return;
+
+			if (current.Team is not (CsTeam.Terrorist or CsTeam.CounterTerrorist) ||
+				!current.PawnIsAlive || plugin.Cache.Get(current) == null)
+				return;
+
+			plugin.Profile.ApplyAgent(current);
+			plugin.GloveApply.Drop(current.Slot);
+
+			if (Environment.TickCount64 - spawnTicks.GetValueOrDefault(slot) < SpawnTeamWindowMs)
+			{
+				plugin.GloveApply.Apply(current, false);
+				plugin.Applier.ApplyInventory(current);
+				return;
+			}
+
+			plugin.Applier.AdvanceLife(current.Slot);
+			plugin.GloveApply.Apply(current, true, refresh: false);
+			plugin.Applier.RefreshAll(current);
+		});
 
 		return HookResult.Continue;
 	}
@@ -251,33 +297,9 @@ public sealed class Events
 	{
 		steamIdsBySlot[slot] = steamId.SteamId64;
 		plugin.EnsureLoadout(steamId.SteamId64);
-		ScheduleProfileResync(1f, 3f, 7f, 15f);
-	}
-
-	private void ResyncProfiles()
-	{
-		foreach (var current in Utilities.GetPlayers())
-		{
-			if (!current.IsValid || current.IsBot || !plugin.Profile.NeedsProfile(current))
-				continue;
-
-			plugin.Profile.ApplyMusic(current);
-			plugin.Profile.ApplyPin(current);
-		}
-	}
-
-	private void ScheduleProfileResync(params float[] delays)
-	{
-		var revision = ++profileResyncRevision;
-		ResyncProfiles();
-		foreach (var delay in delays)
-		{
-			plugin.AddTimer(delay, () =>
-			{
-				if (revision == profileResyncRevision)
-					ResyncProfiles();
-			}, TimerFlags.STOP_ON_MAPCHANGE);
-		}
+		var authorized = Utilities.GetPlayerFromSlot(slot);
+		if (authorized != null)
+			plugin.Profile.Schedule(authorized, 1f, 3f, 7f, 15f);
 	}
 
 
@@ -289,7 +311,7 @@ public sealed class Events
 
 		steamIdsBySlot[player.Slot] = player.SteamID;
 		plugin.EnsureLoadout(player.SteamID);
-		ScheduleProfileResync(0.25f, 1f, 3f, 5f);
+		plugin.Profile.Schedule(player, 0.25f, 1f, 3f, 5f);
 		return HookResult.Continue;
 	}
 
@@ -311,6 +333,7 @@ public sealed class Events
 	private void OnClientDisconnect(int slot)
 	{
 		steamIdsBySlot.Remove(slot, out var steamId);
+		spawnTicks.Remove(slot);
 		if (steamId == 0)
 		{
 			var player = Utilities.GetPlayerFromSlot(slot);
@@ -323,6 +346,7 @@ public sealed class Events
 			plugin.Save(plugin.Store.FlushStatTrak(steamId));
 			plugin.Cache.Drop(steamId);
 			plugin.Links.Forget(steamId);
+			plugin.ForgetPermissions(steamId);
 		}
 
 		pendingInventoryApplies.Remove(slot);
@@ -340,7 +364,8 @@ public sealed class Events
 		plugin.Menu.CloseAll();
 		plugin.Applier.Reset();
 		pendingInventoryApplies.Clear();
-		profileResyncRevision++;
+		spawnTicks.Clear();
+		plugin.Profile.DropAll();
 
 		if (plugin.Catalog.Loaded)
 			return;
@@ -387,8 +412,7 @@ public sealed class Events
 			return;
 
 		steamIdsBySlot[player.Slot] = steamId;
-		plugin.Profile.ApplyMusic(player);
-		plugin.Profile.ApplyPin(player);
+		plugin.Profile.Schedule(player);
 
 		if (!player.PawnIsAlive)
 			return;

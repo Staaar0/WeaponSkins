@@ -14,7 +14,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 {
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.0.1";
+	public override string ModuleVersion => "1.0.2";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -85,7 +85,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		Cache = new PlayerCache(Store, Logger);
 		Applier = new WeaponApplier(this, Cache, Catalog);
 		GloveApply = new GloveService(this, Cache);
-		Profile = new ProfileService(Cache);
+		Profile = new ProfileService(this, Cache);
 		Menu = new MenuRenderer(Config.Menu, Localizer);
 		Menus = new SkinMenus(this);
 		LinkStore = new LinkStore(Db);
@@ -180,6 +180,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		commands.Register();
 		events!.Register();
 		Links.Start();
+		Profile.Start();
 		initialized = true;
 
 		if (loadConnectedPlayers)
@@ -192,6 +193,9 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 	}
 
+	private readonly Dictionary<ulong, (bool Stickers, bool Gen)> publishedPermissions = [];
+	private readonly object permissionSync = new();
+
 	public void EnsureLoadout(ulong steamId)
 	{
 		Links.Track(steamId);
@@ -203,7 +207,24 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		if (!Db.Configured || stopping)
 			return;
 
-		Save(LinkStore.SavePermissions(steamId, StickersAllowed(steamId), GenAllowed(steamId), CancellationToken.None));
+		var stickers = StickersAllowed(steamId);
+		var gen = GenAllowed(steamId);
+
+		lock (permissionSync)
+		{
+			if (publishedPermissions.TryGetValue(steamId, out var previous) && previous == (stickers, gen))
+				return;
+
+			publishedPermissions[steamId] = (stickers, gen);
+		}
+
+		Save(LinkStore.SavePermissions(steamId, stickers, gen, CancellationToken.None));
+	}
+
+	public void ForgetPermissions(ulong steamId)
+	{
+		lock (permissionSync)
+			publishedPermissions.Remove(steamId);
 	}
 
 	public bool CanUseSkins(CCSPlayerController player)

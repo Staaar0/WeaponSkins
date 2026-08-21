@@ -20,6 +20,8 @@ public sealed class WeaponApplier
 	private readonly PlayerCache cache;
 	private readonly CatalogService catalog;
 	private readonly Dictionary<int, Dictionary<int, RenderWear>> stickerWear = [];
+
+	private readonly Dictionary<(int Slot, int DefIndex), AppliedState> appliedStates = [];
 	private readonly HashSet<int> refreshing = [];
 	private readonly Dictionary<int, List<string?>> pendingRefreshes = [];
 	private readonly Dictionary<int, int> lifeRevisions = [];
@@ -29,6 +31,20 @@ public sealed class WeaponApplier
 	private int nextRefreshRevision;
 
 	private readonly record struct RenderWear(float BaseWear, int Steps);
+
+	private readonly record struct AppliedState(
+		uint WeaponHandle,
+		int Team,
+		int MapGeneration,
+		int LifeRevision,
+		bool IsKnife,
+		int Paint,
+		float Wear,
+		int Seed,
+		int StatTrak,
+		string NameTag,
+		float RenderWear,
+		int StickerHash);
 
 	private readonly record struct RefreshContext(
 		int Slot,
@@ -75,6 +91,9 @@ public sealed class WeaponApplier
 
 			if (side.Knife <= 0)
 			{
+				if (AlreadyCleared(player, weapon, defIndex, isKnife))
+					return;
+
 				item.AttributeList.Attributes.RemoveAll();
 				item.NetworkedDynamicAttributes.Attributes.RemoveAll();
 				item.CustomName = "";
@@ -93,6 +112,9 @@ public sealed class WeaponApplier
 		side.Weapons.TryGetValue(defIndex, out var entry);
 		if (entry == null || entry.Paint <= 0)
 		{
+			if (AlreadyCleared(player, weapon, defIndex, isKnife))
+				return;
+
 			if (entry != null)
 			{
 				item.AttributeList.Attributes.RemoveAll();
@@ -114,17 +136,40 @@ public sealed class WeaponApplier
 
 		var paint = catalog.FindPaint(defIndex, entry.Paint);
 		var seedValue = Math.Clamp(entry.Seed, 0, 1000);
-		var seed = seedValue == 0 && entry.Paint is 38 or 417 or 568 or 59 or 44 or 12 ? NextPatternSeed() : seedValue;
 		var wear = ClampWear(entry.Wear, paint, isKnife);
 		entry.Seed = seedValue;
 		entry.Wear = wear;
+
+		var renderWear = StoredStickerWear(player.Slot, defIndex);
+		var state = new AppliedState(
+			weapon.EntityHandle.Raw,
+			(int)player.Team,
+			mapGeneration,
+			lifeRevisions.GetValueOrDefault(player.Slot),
+			isKnife,
+			entry.Paint,
+			wear,
+			seedValue,
+			entry.StatTrak,
+			entry.NameTag ?? "",
+			renderWear ?? wear,
+			StickerHash(entry));
+
+		var stateKey = (player.Slot, defIndex);
+		if (appliedStates.TryGetValue(stateKey, out var applied) && applied == state &&
+			weapon.FallbackPaintKit == entry.Paint)
+			return;
+
+		appliedStates[stateKey] = state;
+
+		var seed = seedValue == 0 && entry.Paint is 38 or 417 or 568 or 59 or 44 or 12 ? NextPatternSeed() : seedValue;
 		weapon.FallbackPaintKit = entry.Paint;
 		weapon.FallbackSeed = seed;
 		weapon.FallbackWear = wear;
 		weapon.FallbackStatTrak = entry.StatTrak;
 		ApplyItemAttributes(player, item, entry, isKnife, seed, wear);
 
-		if (StoredStickerWear(player.Slot, defIndex) is { } bumped)
+		if (renderWear is { } bumped)
 			weapon.FallbackWear = bumped;
 
 		if (paint != null && !isKnife)
@@ -212,6 +257,61 @@ public sealed class WeaponApplier
 			EconAttributes.Set(list, $"sticker slot {sticker.Slot} scale", sticker.Scale);
 		if (sticker.Rotation != 0f)
 			EconAttributes.Set(list, $"sticker slot {sticker.Slot} rotation", sticker.Rotation);
+	}
+
+	private bool AlreadyCleared(CCSPlayerController player, CBasePlayerWeapon weapon, int defIndex, bool isKnife)
+	{
+		var cleared = new AppliedState(
+			weapon.EntityHandle.Raw,
+			(int)player.Team,
+			mapGeneration,
+			lifeRevisions.GetValueOrDefault(player.Slot),
+			isKnife,
+			0,
+			0f,
+			0,
+			-1,
+			"",
+			0f,
+			0);
+
+		var key = (player.Slot, defIndex);
+		if (appliedStates.TryGetValue(key, out var applied) && applied == cleared && weapon.FallbackPaintKit == 0)
+			return true;
+
+		appliedStates[key] = cleared;
+		return false;
+	}
+
+	private static int StickerHash(WeaponEntry entry)
+	{
+		var hash = new HashCode();
+		hash.Add(entry.Stickers.Count);
+
+		foreach (var sticker in entry.Stickers)
+		{
+			hash.Add(sticker.Slot);
+			hash.Add(sticker.Id);
+			hash.Add(sticker.Wear);
+			hash.Add(sticker.Scale);
+			hash.Add(sticker.Rotation);
+			hash.Add(sticker.OffsetX);
+			hash.Add(sticker.OffsetY);
+			hash.Add(sticker.Schema);
+		}
+
+		if (entry.Charm is { } charm)
+		{
+			hash.Add(charm.Id);
+			hash.Add(charm.Pattern);
+			hash.Add(charm.Sticker);
+			hash.Add(charm.Highlight);
+			hash.Add(charm.OffsetX);
+			hash.Add(charm.OffsetY);
+			hash.Add(charm.OffsetZ);
+		}
+
+		return hash.ToHashCode();
 	}
 
 	private float? StoredStickerWear(int slot, int defIndex)
@@ -320,6 +420,8 @@ public sealed class WeaponApplier
 				Apply(player, weapon);
 		}
 	}
+
+	public bool IsRefreshing(int slot) => refreshing.Contains(slot);
 
 	public void SyncSpawnViewModel(CCSPlayerController player)
 	{
@@ -453,12 +555,71 @@ public sealed class WeaponApplier
 				return;
 			}
 
+			var replacementsGiven = false;
+
+			int GiveReplacements()
+			{
+				if (replacementsGiven)
+					return 0;
+
+				replacementsGiven = true;
+				var count = 0;
+				foreach (var entry in weaponsWithAmmo)
+				{
+					foreach (var ammo in entry.Value)
+					{
+						var replacementHandle = GiveWeapon(current, entry.Key);
+						if (replacementHandle == 0)
+							continue;
+
+						count++;
+						Server.NextFrame(() =>
+						{
+							var nextPlayer = ResolveRefreshPlayer(context);
+							var replacement = ResolveWeapon(replacementHandle);
+							if (nextPlayer == null || replacement == null)
+								return;
+
+							replacement.Clip1 = ammo.Clip;
+							if (replacement.ReserveAmmo.Length > 0)
+								replacement.ReserveAmmo[0] = ammo.Reserve;
+						});
+
+						if (!needsKnife)
+							continue;
+
+						var restoreAmmo = ammo;
+						foreach (var delay in AmmoRestoreDelays)
+						{
+							plugin.AddTimer(delay, () =>
+							{
+								var latePlayer = ResolveRefreshPlayer(context);
+								var late = ResolveWeapon(replacementHandle);
+								if (latePlayer == null || late == null)
+									return;
+
+								late.Clip1 = restoreAmmo.Clip;
+								if (late.ReserveAmmo.Length > 0)
+									late.ReserveAmmo[0] = restoreAmmo.Reserve;
+							}, TimerFlags.STOP_ON_MAPCHANGE);
+						}
+					}
+				}
+
+				return count;
+			}
+
 			if (needsKnife && !PlayerHasKnife(current))
 			{
 				var knifeClass = DefaultKnifeClass(current.Team);
 				var firstKnifeHandle = GiveWeapon(current, knifeClass);
-				var temporaryPistolHandle = GiveWeapon(current, "weapon_usp_silencer");
+
+				var temporaryPistolHandle = GiveReplacements() > 0
+					? 0u
+					: GiveWeapon(current, "weapon_usp_silencer");
+
 				var finalKnifeHandle = GiveWeapon(current, knifeClass);
+				current.ExecuteClientCommand("slot3");
 
 				Server.NextFrame(() =>
 				{
@@ -483,46 +644,7 @@ public sealed class WeaponApplier
 				});
 			}
 
-			foreach (var entry in weaponsWithAmmo)
-			{
-				foreach (var ammo in entry.Value)
-				{
-					var replacementHandle = GiveWeapon(current, entry.Key);
-					if (replacementHandle == 0)
-						continue;
-
-					Server.NextFrame(() =>
-					{
-						var nextPlayer = ResolveRefreshPlayer(context);
-						var replacement = ResolveWeapon(replacementHandle);
-						if (nextPlayer == null || replacement == null)
-							return;
-
-						replacement.Clip1 = ammo.Clip;
-						if (replacement.ReserveAmmo.Length > 0)
-							replacement.ReserveAmmo[0] = ammo.Reserve;
-					});
-
-					if (!needsKnife)
-						continue;
-
-					var restoreAmmo = ammo;
-					foreach (var delay in AmmoRestoreDelays)
-					{
-						plugin.AddTimer(delay, () =>
-						{
-							var latePlayer = ResolveRefreshPlayer(context);
-							var late = ResolveWeapon(replacementHandle);
-							if (latePlayer == null || late == null)
-								return;
-
-							late.Clip1 = restoreAmmo.Clip;
-							if (late.ReserveAmmo.Length > 0)
-								late.ReserveAmmo[0] = restoreAmmo.Reserve;
-						}, TimerFlags.STOP_ON_MAPCHANGE);
-					}
-				}
-			}
+			GiveReplacements();
 
 			RestoreActiveWeaponSlot(context, restoreSlotCommand);
 			plugin.AddTimer(0.12f, () => CompleteRefresh(context), TimerFlags.STOP_ON_MAPCHANGE);
@@ -758,8 +880,15 @@ public sealed class WeaponApplier
 
 
 
+	private void ForgetAppliedStates(int slot)
+	{
+		foreach (var key in appliedStates.Keys.Where(k => k.Slot == slot).ToList())
+			appliedStates.Remove(key);
+	}
+
 	public void AdvanceLife(int slot)
 	{
+		ForgetAppliedStates(slot);
 		lifeRevisions[slot] = unchecked(lifeRevisions.GetValueOrDefault(slot) + 1);
 		activeRefreshRevisions.Remove(slot);
 		refreshing.Remove(slot);
@@ -768,6 +897,7 @@ public sealed class WeaponApplier
 
 	public void Drop(int slot)
 	{
+		ForgetAppliedStates(slot);
 		stickerWear.Remove(slot);
 		lifeRevisions.Remove(slot);
 		activeRefreshRevisions.Remove(slot);
@@ -778,6 +908,7 @@ public sealed class WeaponApplier
 	public void Reset()
 	{
 		mapGeneration = unchecked(mapGeneration + 1);
+		appliedStates.Clear();
 		lifeRevisions.Clear();
 		activeRefreshRevisions.Clear();
 		refreshing.Clear();
