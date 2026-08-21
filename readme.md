@@ -102,13 +102,13 @@ Command names can be changed in the config, except `!link`.
     "vip_flag": "@css/vip"
   },
   "agents": {
-    "change_cooldown": 10
+    "change_cooldown": 5
   },
   "menu": {
     "freeze_player": false,
     "items_per_page": 4,
     "show_image": true,
-    "image_seconds": 1
+    "image_seconds": 2
   },
   "commands": {
     "skins": [
