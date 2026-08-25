@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API.Core;
 
@@ -6,13 +7,17 @@ namespace WeaponSkins;
 public class SkinsConfig : BasePluginConfig
 {
 	[JsonPropertyName("ConfigVersion")]
-	public override int Version { get; set; } = 2;
+	public override int Version { get; set; } = 3;
 
 	[JsonPropertyName("api")]
 	public ApiConfig Api { get; set; } = new();
 
 	[JsonPropertyName("database")]
 	public DatabaseConfig Database { get; set; } = new();
+
+	[JsonPropertyName("linking_method")]
+	[JsonConverter(typeof(LinkingMethodConverter))]
+	public string LinkingMethod { get; set; } = "1";
 
 	[JsonPropertyName("link_required")]
 	public bool LinkRequired { get; set; } = false;
@@ -31,6 +36,25 @@ public class SkinsConfig : BasePluginConfig
 
 	[JsonPropertyName("commands")]
 	public CommandsConfig Commands { get; set; } = new();
+}
+
+public sealed class LinkingMethodConverter : JsonConverter<string>
+{
+	public override string Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+	{
+		if (reader.TokenType == JsonTokenType.String)
+			return reader.GetString() ?? "WeaponSkinsBOT";
+
+		if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var value))
+			return value.ToString();
+
+		throw new JsonException("Invalid linking_method");
+	}
+
+	public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+	{
+		writer.WriteStringValue(value);
+	}
 }
 
 public class ApiConfig

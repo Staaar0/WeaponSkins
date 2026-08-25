@@ -4,6 +4,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Core.Attributes;
+using CounterStrikeSharp.API.Modules.Extensions;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 
@@ -14,7 +15,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 {
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.0.2";
+	public override string ModuleVersion => "1.0.3";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -30,6 +31,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	public LinkService Links { get; private set; } = null!;
 	public LinkStore LinkStore { get; private set; } = null!;
 
+	public bool Initialized => initialized;
 	public bool Stopping => stopping;
 
 	private static readonly Dictionary<string, char> ColorMap = new(StringComparer.OrdinalIgnoreCase)
@@ -72,7 +74,51 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	public void OnConfigParsed(SkinsConfig config)
 	{
+		if (config.LinkingMethod == "2" || string.Equals(config.LinkingMethod, "Discord-Utilities", StringComparison.OrdinalIgnoreCase))
+			config.LinkingMethod = "Discord-Utilities";
+		else if (config.LinkingMethod == "1" || string.Equals(config.LinkingMethod, "WeaponSkinsBOT", StringComparison.OrdinalIgnoreCase))
+			config.LinkingMethod = "WeaponSkinsBOT";
+		else
+		{
+			Logger.LogWarning("Unknown linking_method '{Method}', using WeaponSkinsBOT", config.LinkingMethod);
+			config.LinkingMethod = "WeaponSkinsBOT";
+		}
+
 		Config = config;
+		UpdateLinkingMethodNote();
+	}
+
+	private void UpdateLinkingMethodNote()
+	{
+		try
+		{
+			var path = Config.GetConfigPath();
+			if (!File.Exists(path) || !string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase))
+				return;
+
+			var original = File.ReadAllLines(path);
+			var lines = original.Where(line => !line.Contains("\"linking_method_note\"", StringComparison.Ordinal)).ToArray();
+			var changed = lines.Length != original.Length;
+			for (var i = 0; i < lines.Length; i++)
+			{
+				if (!lines[i].TrimStart().StartsWith("\"linking_method\"", StringComparison.Ordinal))
+					continue;
+
+				var comment = lines[i].IndexOf("//", StringComparison.Ordinal);
+				var value = (comment < 0 ? lines[i] : lines[i][..comment]).TrimEnd();
+				var updated = $"{value} // link options 1=WeaponSkinsBOT 2=Discord-Utilities";
+				changed |= lines[i] != updated;
+				lines[i] = updated;
+				break;
+			}
+
+			if (changed)
+				File.WriteAllLines(path, lines);
+		}
+		catch (Exception ex)
+		{
+			Logger.LogWarning("Could not add the linking_method config note: {Error}", ex.GetBaseException().Message);
+		}
 	}
 
 	public override void Load(bool hotReload)
@@ -90,10 +136,12 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		Menus = new SkinMenus(this);
 		LinkStore = new LinkStore(Db);
 		Links = new LinkService(this, LinkStore);
+		commands = new Commands(this);
+		commands.RegisterLink();
 		events = new Events(this);
 		events.RegisterPrecache();
 
-		if (Config.LinkRequired && !Db.Configured)
+		if (!Links.UsesDiscordUtilities && Config.LinkRequired && !Db.Configured)
 			Logger.LogWarning("link_required is enabled but the database is not configured, Discord linking stays off");
 
 		if (Db.Configured)
@@ -120,7 +168,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	{
 		try
 		{
-			await Db.Bootstrap(Config.LinkRequired);
+			await Db.Bootstrap(Links.CanIssueCodes);
 		}
 		catch (Exception ex)
 		{
@@ -140,7 +188,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	private async Task BackfillPermissions()
 	{
-		if (!Config.LinkRequired || stopping)
+		if (!Links.CanIssueCodes || stopping)
 			return;
 
 		List<ulong> linked;
@@ -176,8 +224,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		if (initialized || stopping)
 			return;
 
-		commands = new Commands(this);
-		commands.Register();
+		commands!.Register();
 		events!.Register();
 		Links.Start();
 		Profile.Start();

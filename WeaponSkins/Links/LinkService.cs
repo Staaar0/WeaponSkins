@@ -21,6 +21,7 @@ public sealed class LinkService
 
 	private readonly WeaponSkins plugin;
 	private readonly LinkStore store;
+	private readonly DiscordUtilitiesLinkProvider? discordUtilities;
 	private readonly object sync = new();
 	private readonly HashSet<ulong> online = [];
 	private readonly HashSet<ulong> linked = [];
@@ -30,13 +31,18 @@ public sealed class LinkService
 	private CancellationTokenSource? cancellation;
 	private Task? loop;
 
+	public bool UsesDiscordUtilities { get; }
 	public bool Required { get; }
+	public bool CanIssueCodes => !UsesDiscordUtilities && Required;
 
 	public LinkService(WeaponSkins plugin, LinkStore store)
 	{
 		this.plugin = plugin;
 		this.store = store;
-		Required = plugin.Config.LinkRequired && plugin.Db.Configured;
+		UsesDiscordUtilities = string.Equals(plugin.Config.LinkingMethod, "Discord-Utilities", StringComparison.OrdinalIgnoreCase);
+		Required = UsesDiscordUtilities || plugin.Config.LinkRequired && plugin.Db.Configured;
+		if (UsesDiscordUtilities)
+			discordUtilities = new DiscordUtilitiesLinkProvider(plugin.Logger);
 	}
 
 	public void Start()
@@ -46,6 +52,8 @@ public sealed class LinkService
 
 		cancellation = new CancellationTokenSource();
 		loop = Poll(cancellation.Token);
+		if (UsesDiscordUtilities)
+			Server.NextFrame(SyncDiscordUtilities);
 	}
 
 	public void Stop()
@@ -91,6 +99,15 @@ public sealed class LinkService
 		if (steamId == 0)
 			return;
 
+		if (UsesDiscordUtilities)
+		{
+			lock (sync)
+				online.Add(steamId);
+
+			SyncDiscordUtilities(steamId);
+			return;
+		}
+
 		bool fetch;
 		var resolve = false;
 		lock (sync)
@@ -104,7 +121,10 @@ public sealed class LinkService
 		if (fetch)
 			plugin.Cache.Fetch(steamId);
 		else if (resolve)
+		{
+			Notice(steamId);
 			_ = Resolve(steamId);
+		}
 	}
 
 	public void Forget(ulong steamId)
@@ -121,6 +141,9 @@ public sealed class LinkService
 
 	public void RequestCode(CCSPlayerController player)
 	{
+		if (!CanIssueCodes)
+			return;
+
 		var steamId = player.SteamID;
 		if (steamId == 0)
 			return;
@@ -208,8 +231,6 @@ public sealed class LinkService
 				Server.NextFrame(() => Complete(steamId, true));
 				return;
 			}
-
-			Server.NextFrame(() => Notice(steamId));
 		}
 		catch (OperationCanceledException)
 		{
@@ -248,6 +269,7 @@ public sealed class LinkService
 				return;
 
 			pending.Remove(steamId);
+			queried.Remove(steamId);
 			nextCode.Remove(steamId);
 		}
 
@@ -268,6 +290,12 @@ public sealed class LinkService
 				await Task.Delay(TickMs, cancellationToken);
 				tick++;
 
+				if (UsesDiscordUtilities)
+				{
+					Server.NextFrame(SyncDiscordUtilities);
+					continue;
+				}
+
 				if (Required)
 					await Detect(tick % SweepEveryTicks == 0 ? Unlinked() : Pending(), cancellationToken);
 
@@ -286,6 +314,48 @@ public sealed class LinkService
 				plugin.LogDatabaseError(ex);
 			}
 		}
+	}
+
+	private void SyncDiscordUtilities()
+	{
+		if (plugin.Stopping)
+			return;
+
+		foreach (var steamId in Online())
+			SyncDiscordUtilities(steamId);
+	}
+
+	private void SyncDiscordUtilities(ulong steamId)
+	{
+		if (plugin.Stopping || Player(steamId) is not { } player ||
+			discordUtilities == null || !discordUtilities.TryIsLinked(steamId, out var isLinked))
+			return;
+
+		if (isLinked)
+		{
+			Complete(steamId, true);
+			return;
+		}
+
+		bool wasLinked;
+		bool notice;
+		lock (sync)
+		{
+			wasLinked = linked.Remove(steamId);
+			pending.Remove(steamId);
+			nextCode.Remove(steamId);
+			notice = queried.Add(steamId);
+		}
+
+		if (wasLinked)
+		{
+			plugin.Menu.Close(player);
+			plugin.Save(plugin.Store.FlushStatTrak(steamId));
+			plugin.Cache.Drop(steamId);
+		}
+
+		if (notice)
+			Notice(steamId);
 	}
 
 	private async Task Detect(List<ulong> watched, CancellationToken cancellationToken)

@@ -33,8 +33,15 @@ public sealed class Commands
 		Add(commands.Seed, "Sets the pattern seed of the held weapon", OnSeed);
 		Add(commands.Gen, "Applies an inspect code to your loadout", OnGen);
 		Add(commands.Reload, "Reloads the item data", OnReload);
+	}
 
-		if (plugin.Links.Required)
+	public void RegisterLink()
+	{
+		if (plugin.Links.UsesDiscordUtilities)
+			return;
+
+		plugin.AddCommandListener(null, OnLinkExclusive, HookMode.Pre);
+		if (plugin.Links.CanIssueCodes)
 			plugin.AddCommand("css_link", "Gives you a code to link your Steam account in Discord", OnLink);
 	}
 
@@ -73,10 +80,43 @@ public sealed class Commands
 		return player;
 	}
 
+	private HookResult OnLinkExclusive(CCSPlayerController? caller, CommandInfo info)
+	{
+		var command = info.GetArg(0);
+		if (IsUnlinkCommand(command))
+			return caller != null && caller.IsValid && !caller.IsBot ? HookResult.Stop : HookResult.Continue;
+
+		if (!plugin.Links.CanIssueCodes)
+			return HookResult.Continue;
+
+		if (!string.Equals(command, "css_link", StringComparison.OrdinalIgnoreCase) &&
+			!string.Equals(command, "link", StringComparison.OrdinalIgnoreCase) &&
+			!string.Equals(command, "!link", StringComparison.OrdinalIgnoreCase) &&
+			!string.Equals(command, "/link", StringComparison.OrdinalIgnoreCase))
+			return HookResult.Continue;
+
+		OnLink(caller, info);
+		return HookResult.Stop;
+	}
+
+	private static bool IsUnlinkCommand(string command)
+	{
+		return string.Equals(command, "css_unlink", StringComparison.OrdinalIgnoreCase) ||
+			string.Equals(command, "unlink", StringComparison.OrdinalIgnoreCase) ||
+			string.Equals(command, "!unlink", StringComparison.OrdinalIgnoreCase) ||
+			string.Equals(command, "/unlink", StringComparison.OrdinalIgnoreCase);
+	}
+
 	private void OnLink(CCSPlayerController? caller, CommandInfo info)
 	{
 		if (caller == null || !caller.IsValid || caller.IsBot)
 			return;
+
+		if (!plugin.Initialized)
+		{
+			plugin.Reply(caller, "data_not_loaded");
+			return;
+		}
 
 		plugin.Links.RequestCode(caller);
 	}

@@ -11,7 +11,7 @@ A CSSharp plugin for CS2 that gives players full control over how their loadout 
 - Music kit selector
 - Pins selector
 - Sticker menu with 4 slots per weapon (with optional **VIP-Only** option **OFF** by default) NOTE: !gen,!stickers share same VIP-Only optional setting
-- Gen codes: apply a full custom craft with one command from [cs2inspects](https://cs2inspects.com/sticker-customizer)/[csfloat](https://csfloat.com/db)/[steam](https://steamcommunity.com/market/search?appid=730)/[cs2preview](https://cs2preview.com/craft) inspect codes
+- Gen codes: apply a full custom craft with one command from [cs2inspects](https://cs2inspects.com/sticker-customizer)/[csfloat](https://csfloat.com/db)/[steam](https://steamcommunity.com/market/search?appid=730)/[cs2preview](https://cs2preview.com/craft) inspect link code
 - Auto skins update after game update
 - Everything is saved per player and per team in MySQL
 - Optional Discord bot for linking and changing skins from Discord
@@ -44,8 +44,12 @@ A CSSharp plugin for CS2 that gives players full control over how their loadout 
 ## Requirements
 
 - CounterStrikeSharp v1.0.371 or newer
-- MySQL (optional but strongly recommended — without it nothing persists across reconnects)
+- MySQL
 - Disable `FollowCS2ServerGuidelines` path: `addons/counterstrikesharp/configs/core.json`
+
+## link system Requirements
+- [WeaponSkins_Bot](https://github.com/Staaar0/WeaponSkins_Bot) For link system / everything can be changed via discord
+- [CS2-Discord-Utilities](https://github.com/NockyCZ/CS2-Discord-Utilities) For link system only / NO skins changes via discord
 
 ## Install
 
@@ -70,17 +74,14 @@ A CSSharp plugin for CS2 that gives players full control over how their loadout 
 | `!seed` | Set weapon seed |
 | `!st` | Toggle StatTrak |
 | `!g <code>` | Apply a gen code |
-| `!link` | Get a Discord link code (only when `link_required` is on) |
+| `!link` | Get a Discord link code |
 
 Command names can be changed in the config, except `!link`.
 
 ## Default Config
-<details>
-<summary><strong></strong></summary>
-
 ```json
 {
-  "ConfigVersion": 2,
+  "ConfigVersion": 3,
   "api": {
     "base_url": "https://cdn.jsdelivr.net/gh/ByMykel/CSGO-API@main/public/api",
     "language": "en",
@@ -94,6 +95,7 @@ Command names can be changed in the config, except `!link`.
     "name": "",
     "ssl_mode": "Preferred"
   },
+  "linking_method": "1", // link options 1=WeaponSkinsBOT 2=Discord-Utilities
   "link_required": false,
   "discord_link": "",
   "stickers": {
@@ -166,47 +168,34 @@ Command names can be changed in the config, except `!link`.
   }
 }
 ```
-</details>
-
-## Discord Bot
-
-The bot is ready to use, you do not have to build anything: **[WeaponSkins_Bot](https://github.com/Staaar0/WeaponSkins_Bot)**
-
-It gives players two things:
-
-- **Linking** — a player links their Steam account to their Discord account
-- **Skins from Discord** — linked players change their skins, knife, gloves, agent, music kit and pin from Discord, and it shows up in game right away
-
-### 1. Turn it on in the plugin
-
+## Discord Bots
+- **[very important]** if you used one of the linking methods and want to change after the change Restart or reload WeaponSkins.
+### To use WeaponSkinsBOT use the following config
 In `WeaponSkins.json`:
 
 ```json
+"linking_method": "1", // link options 1=WeaponSkinsBOT 2=Discord-Utilities
 "link_required": true,
 "discord_link": "https://discord.gg/yourserver"
 ```
 
 Restart the server once so the plugin creates the linking tables.
 
-With `link_required` on, skin commands are blocked until the player links, and `!link` always works. Leave it `false` if you want the Discord menus without forcing anyone to link.
+With `link_required` on, skin commands are blocked until the player links.
 
-### 2. Run the bot
+### To use Discord-Utilities use the following config
+In `WeaponSkins.json`:
 
-1. Download the latest build from the [bot releases](https://github.com/Staaar0/WeaponSkins_Bot/releases), Windows and Linux are both there
-2. See discord bot [README](https://github.com/Staaar0/WeaponSkins_Bot/blob/main/README.md) about how to run the bot or making your own
-
-### 3. How players use it
-
-| Where | What they type |
-| --- | --- |
-| In game | `!link` → the server gives a code like `ABCD-1234` |
-| Discord | `/link ABCD-1234` |
-| Discord | `/skins`, `/knife`, `/gloves`, `/agents`, `/music`, `/pins`, `/loadout` |
-
-Changes land in game in a second or two. No `!wp`, no reconnect, no respawn, no map change.
-
-Want to write your own bot instead? It only needs the `ws_links`, `ws_link_codes`, `ws_sync_queue` and `ws_permissions` tables, and [WeaponSkins_Bot](https://github.com/Staaar0/WeaponSkins_Bot) is an open example of how to use them.
+```json
+"linking_method": "2", // link options 1=WeaponSkinsBOT 2=Discord-Utilities
+```
+this options will be ignored even if it has been configured
+```json
+"link_required": true,
+"discord_link": "https://discord.gg/yourserver"
+```
+because WeaponSkins will use [CS2-Discord-Utilities](https://github.com/NockyCZ/CS2-Discord-Utilities) config
 
 ## NOTES:
-- in-game inspect codes from [csfloat](https://csfloat.com/db) and [steam](https://steamcommunity.com/market/search?appid=730) does work but the inspects link contain this `//` if you want to ues inspect links from both you must remove one of the `//`
-- full inspect links work with or without `//` in discord bot with !gen command
+- in-game inspect links from [csfloat](https://csfloat.com/db) and [steam](https://steamcommunity.com/market/search?appid=730) does work but the inspects links contain `//` if you want to ues inspect links from both you must remove one of the `//` = `/`
+- full inspect links work with or without `//` in [WeaponSkins_Bot](https://github.com/Staaar0/WeaponSkins_Bot) discord bot with !gen command

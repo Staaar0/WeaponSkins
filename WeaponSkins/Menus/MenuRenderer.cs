@@ -11,7 +11,7 @@ namespace WeaponSkins;
 public sealed class MenuRenderer
 {
 	private const ulong InspectButton = 1UL << 35;
-	private const int DrawIntervalMs = 75;
+	private const int DrawIntervalMs = 50;
 	private const int SelectCooldownMs = 200;
 
 	private readonly Dictionary<int, MenuSession> sessions = [];
