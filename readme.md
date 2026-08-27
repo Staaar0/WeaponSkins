@@ -200,8 +200,8 @@ Command names can be changed in the config, except `!link`.
 In `WeaponSkins.json`:
 
 ```json
-"discord_bot_token": "YOUR_BOT_TOKEN", // Discord bot will start/stop with cs2 server
-"linking_method": "1", // link options 1=WeaponSkinsBOT 2=Discord-Utilities
+"discord_bot_token": "YOUR_BOT_TOKEN",
+"linking_method": "1",
 "link_required": true,
 "discord_link": "https://discord.gg/yourserver"
 ```
@@ -214,7 +214,7 @@ With `link_required` on, skin commands are blocked until the player links.
 In `WeaponSkins.json`:
 
 ```json
-"linking_method": "2", // link options 1=WeaponSkinsBOT 2=Discord-Utilities
+"linking_method": "2",
 ```
 Those options will be ignored even if they are configured
 ```json
