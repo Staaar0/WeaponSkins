@@ -1,6 +1,7 @@
 bin/
 obj/
 publish/
+BotData/
 .vs/
 .idea/
 *.user

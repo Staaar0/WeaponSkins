@@ -7,13 +7,16 @@ namespace WeaponSkins;
 public class SkinsConfig : BasePluginConfig
 {
 	[JsonPropertyName("ConfigVersion")]
-	public override int Version { get; set; } = 3;
+	public override int Version { get; set; } = 4;
 
 	[JsonPropertyName("api")]
 	public ApiConfig Api { get; set; } = new();
 
 	[JsonPropertyName("database")]
 	public DatabaseConfig Database { get; set; } = new();
+
+	[JsonPropertyName("discord_bot_token")]
+	public string DiscordBotToken { get; set; } = "YOUR_BOT_TOKEN";
 
 	[JsonPropertyName("linking_method")]
 	[JsonConverter(typeof(LinkingMethodConverter))]
@@ -23,7 +26,7 @@ public class SkinsConfig : BasePluginConfig
 	public bool LinkRequired { get; set; } = false;
 
 	[JsonPropertyName("discord_link")]
-	public string DiscordLink { get; set; } = "";
+	public string DiscordLink { get; set; } = "https://discord.gg/yourserver";
 
 	[JsonPropertyName("stickers")]
 	public StickersConfig Stickers { get; set; } = new();

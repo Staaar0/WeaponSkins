@@ -30,7 +30,7 @@ jobs:
           mkdir -p package/addons/counterstrikesharp/plugins/WeaponSkins
           mkdir -p package/addons/counterstrikesharp/gamedata
 
-          cp publish/WeaponSkins.dll publish/MySqlConnector.dll package/addons/counterstrikesharp/plugins/WeaponSkins/
+          find publish -maxdepth 1 -type f -name '*.dll' ! -name 'CounterStrikeSharp.API.dll' ! -name 'Microsoft.Extensions.*.dll' -exec cp {} package/addons/counterstrikesharp/plugins/WeaponSkins/ \;
           cp -r publish/Data package/addons/counterstrikesharp/plugins/WeaponSkins/Data
           cp -r publish/lang package/addons/counterstrikesharp/plugins/WeaponSkins/lang
           cp publish/gamedata/weaponskins.json package/addons/counterstrikesharp/gamedata/weaponskins.json

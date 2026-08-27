@@ -33,7 +33,8 @@ public sealed class LinkService
 
 	public bool UsesDiscordUtilities { get; }
 	public bool Required { get; }
-	public bool CanIssueCodes => !UsesDiscordUtilities && Required;
+	public bool CanIssueCodes => !UsesDiscordUtilities &&
+		(Required || plugin.Db.Configured && plugin.HasDiscordBotToken);
 
 	public LinkService(WeaponSkins plugin, LinkStore store)
 	{
@@ -47,7 +48,7 @@ public sealed class LinkService
 
 	public void Start()
 	{
-		if (!Required || loop != null)
+		if ((!Required && !CanIssueCodes) || loop != null)
 			return;
 
 		cancellation = new CancellationTokenSource();
@@ -296,7 +297,7 @@ public sealed class LinkService
 					continue;
 				}
 
-				if (Required)
+				if (CanIssueCodes)
 					await Detect(tick % SweepEveryTicks == 0 ? Unlinked() : Pending(), cancellationToken);
 
 				if (tick % SyncEveryTicks == 0)
@@ -407,7 +408,7 @@ public sealed class LinkService
 
 	private async Task Maintain(CancellationToken cancellationToken)
 	{
-		if (Required)
+		if (CanIssueCodes)
 			await store.PurgeCodes(cancellationToken);
 
 		await store.PurgeSync(cancellationToken);

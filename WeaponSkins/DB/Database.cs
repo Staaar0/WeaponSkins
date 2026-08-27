@@ -129,7 +129,17 @@ public sealed class Database
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 		""";
 
-	public async Task Bootstrap(bool linkTables)
+	private const string BotLeaseTable = """
+		CREATE TABLE IF NOT EXISTS ws_bot_leases (
+			token_hash BINARY(32) NOT NULL,
+			owner_id CHAR(32) NOT NULL,
+			lease_until DATETIME(6) NOT NULL,
+			PRIMARY KEY (token_hash),
+			INDEX ix_ws_bot_lease_expiry (lease_until)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+		""";
+
+	public async Task Bootstrap(bool linkTables, bool botLeaseTable)
 	{
 		await using var connection = await Open();
 		if (!await AcquireSchemaLock(connection))
@@ -203,6 +213,8 @@ public sealed class Database
 				) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 				{(linkTables ? LinkTables : "")}
+
+				{(botLeaseTable ? BotLeaseTable : "")}
 				""";
 			await command.ExecuteNonQueryAsync();
 			await Migrate(connection);

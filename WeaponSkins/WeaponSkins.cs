@@ -15,7 +15,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 {
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.0.3";
+	public override string ModuleVersion => "1.1.0";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -64,6 +64,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	private readonly object databaseErrorSync = new();
 	private Events? events;
 	private Commands? commands;
+	private DiscordBotCoordinator? discordBot;
 	private Task? bootstrapTask;
 	private CancellationTokenSource? statTrakFlushCancellation;
 	private Task? statTrakFlushTask;
@@ -85,10 +86,10 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 
 		Config = config;
-		UpdateLinkingMethodNote();
+		UpdateConfigNotes();
 	}
 
-	private void UpdateLinkingMethodNote()
+	private void UpdateConfigNotes()
 	{
 		try
 		{
@@ -101,15 +102,21 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			var changed = lines.Length != original.Length;
 			for (var i = 0; i < lines.Length; i++)
 			{
-				if (!lines[i].TrimStart().StartsWith("\"linking_method\"", StringComparison.Ordinal))
+				var trimmed = lines[i].TrimStart();
+				string? note = null;
+				if (trimmed.StartsWith("\"linking_method\"", StringComparison.Ordinal))
+					note = "link options 1=WeaponSkinsBOT 2=Discord-Utilities";
+				else if (trimmed.StartsWith("\"discord_bot_token\"", StringComparison.Ordinal))
+					note = "Discord bot will start/stop with cs2 server";
+
+				if (note == null)
 					continue;
 
 				var comment = lines[i].IndexOf("//", StringComparison.Ordinal);
 				var value = (comment < 0 ? lines[i] : lines[i][..comment]).TrimEnd();
-				var updated = $"{value} // link options 1=WeaponSkinsBOT 2=Discord-Utilities";
+				var updated = $"{value} // {note}";
 				changed |= lines[i] != updated;
 				lines[i] = updated;
-				break;
 			}
 
 			if (changed)
@@ -117,7 +124,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 		catch (Exception ex)
 		{
-			Logger.LogWarning("Could not add the linking_method config note: {Error}", ex.GetBaseException().Message);
+			Logger.LogWarning("Could not add the config notes: {Error}", ex.GetBaseException().Message);
 		}
 	}
 
@@ -136,6 +143,11 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		Menus = new SkinMenus(this);
 		LinkStore = new LinkStore(Db);
 		Links = new LinkService(this, LinkStore);
+		if (DiscordBotEnabled)
+		{
+			discordBot = new DiscordBotCoordinator(this, Db, Config.DiscordBotToken.Trim());
+			discordBot.Start();
+		}
 		commands = new Commands(this);
 		commands.RegisterLink();
 		events = new Events(this);
@@ -143,6 +155,11 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 		if (!Links.UsesDiscordUtilities && Config.LinkRequired && !Db.Configured)
 			Logger.LogWarning("link_required is enabled but the database is not configured, Discord linking stays off");
+		else if (!Links.UsesDiscordUtilities && Config.LinkRequired && !HasDiscordBotToken)
+			Logger.LogWarning("link_required is enabled but discord_bot_token is not configured, WeaponSkinsBOT cannot come online");
+
+		if (!Links.UsesDiscordUtilities && HasDiscordBotToken && !Db.Configured)
+			Logger.LogWarning("discord_bot_token is configured but the database is not, WeaponSkinsBOT stays offline");
 
 		if (Db.Configured)
 		{
@@ -168,10 +185,12 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	{
 		try
 		{
-			await Db.Bootstrap(Links.CanIssueCodes);
+			await Db.Bootstrap(Links.CanIssueCodes, DiscordBotEnabled);
+			discordBot?.DatabaseReady();
 		}
 		catch (Exception ex)
 		{
+			discordBot?.DatabaseUnavailable();
 			if (!stopping)
 				Logger.LogCritical("Database bootstrap failed: {Error}", ex.GetBaseException().Message);
 			return;
@@ -284,6 +303,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		stopping = true;
 		events?.Unregister();
 		statTrakFlushCancellation?.Cancel();
+		discordBot?.Stop();
 		Links.Stop();
 		Cache.Clear();
 		Applier.Dispose();
@@ -320,6 +340,23 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			statTrakFlushCancellation?.Dispose();
 		}
 	}
+
+	public bool HasDiscordBotToken =>
+		!string.IsNullOrWhiteSpace(Config.DiscordBotToken) &&
+		!string.Equals(Config.DiscordBotToken.Trim(), "YOUR_BOT_TOKEN", StringComparison.OrdinalIgnoreCase);
+
+	internal static void PrintDiscordBotLoading()
+	{
+		Console.WriteLine("\u001b[93m[WeaponSkins] \u001b[97mLoading Discord BOT...\u001b[0m");
+	}
+
+	internal static void PrintDiscordBotConnected()
+	{
+		Console.WriteLine("\u001b[92m[WeaponSkins] \u001b[97mDiscord BOT has been connected!\u001b[0m");
+	}
+
+	private bool DiscordBotEnabled =>
+		!Links.UsesDiscordUtilities && Db.Configured && HasDiscordBotToken;
 
 	private async Task FlushStatTrakLoop(CancellationToken cancellationToken)
 	{
