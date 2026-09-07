@@ -1,4 +1,4 @@
-# WeaponSkins
+# WeaponSkins.
 
 A CSSharp plugin for CS2 that gives players full control over how their loadout looks.
 
