@@ -11,6 +11,7 @@ namespace WeaponSkins;
 public sealed class Commands
 {
 	private readonly WeaponSkins plugin;
+	private readonly HashSet<string> vipCommands = new(StringComparer.OrdinalIgnoreCase);
 
 	public Commands(WeaponSkins plugin)
 	{
@@ -19,6 +20,14 @@ public sealed class Commands
 
 	public void Register()
 	{
+		vipCommands.Clear();
+		foreach (var command in plugin.Config.VipCommands.Commands)
+		{
+			var normalized = NormalizeCommand(command);
+			if (normalized.Length > 0)
+				vipCommands.Add(normalized);
+		}
+
 		var commands = plugin.Config.Commands;
 		Add(commands.Skins, "Opens the weapon skins menu", OnSkins);
 		Add(commands.Knife, "Opens the knife menu", OnKnife);
@@ -32,6 +41,7 @@ public sealed class Commands
 		Add(commands.Wear, "Sets the wear of the held weapon", OnWear);
 		Add(commands.Seed, "Sets the pattern seed of the held weapon", OnSeed);
 		Add(commands.Gen, "Applies an inspect code to your loadout", OnGen);
+		Add(commands.Copy, "Copies the held skin of the player you are spectating", OnCopy);
 		Add(commands.Reload, "Reloads the item data", OnReload);
 	}
 
@@ -47,11 +57,50 @@ public sealed class Commands
 
 	private void Add(List<string> aliases, string description, CommandInfo.CommandCallback handler)
 	{
-		foreach (var alias in aliases.Distinct(StringComparer.OrdinalIgnoreCase))
+		var names = aliases
+			.Where(alias => alias.Length > 0)
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.ToList();
+
+		if (names.Count == 0)
+			return;
+
+		var vipOnly = names.Any(alias => vipCommands.Contains(NormalizeCommand(alias)));
+		var callback = vipOnly ? VipGate(handler) : handler;
+		foreach (var alias in names)
+			plugin.AddCommand($"css_{alias}", description, callback);
+	}
+
+	private bool CanUseCommand(CCSPlayerController? caller)
+	{
+		if (caller == null || !caller.IsValid || caller.IsBot)
+			return true;
+
+		if (!string.IsNullOrWhiteSpace(plugin.Config.VipCommands.VipFlag) &&
+			AdminManager.PlayerHasPermissions(caller, plugin.Config.VipCommands.VipFlag))
+			return true;
+
+		plugin.Reply(caller, "command_vip_only");
+		return false;
+	}
+
+	private CommandInfo.CommandCallback VipGate(CommandInfo.CommandCallback handler)
+	{
+		return (caller, info) =>
 		{
-			if (alias.Length > 0)
-				plugin.AddCommand($"css_{alias}", description, handler);
-		}
+			if (CanUseCommand(caller))
+				handler(caller, info);
+		};
+	}
+
+	private static string NormalizeCommand(string command)
+	{
+		var normalized = command.Trim();
+		while (normalized.StartsWith('!') || normalized.StartsWith('/'))
+			normalized = normalized[1..];
+		if (normalized.StartsWith("css_", StringComparison.OrdinalIgnoreCase))
+			normalized = normalized[4..];
+		return normalized;
 	}
 
 	private CCSPlayerController? Ready(CCSPlayerController? player)
@@ -367,6 +416,114 @@ public sealed class Commands
 			plugin.Reply(player, "gen_stickers_stripped");
 	}
 
+	private void OnCopy(CCSPlayerController? caller, CommandInfo info)
+	{
+		if (Ready(caller) is not { } player)
+			return;
+
+		if (player.PawnIsAlive)
+		{
+			plugin.Reply(player, "copy_spectate_first");
+			return;
+		}
+
+		if (!plugin.AllowGenAction(player))
+			return;
+
+		var target = SpectatedPlayer(player);
+		if (target == null)
+		{
+			plugin.Reply(player, "copy_spectate_first");
+			return;
+		}
+
+		var sourceLoadout = plugin.Cache.Get(target);
+		if (sourceLoadout == null)
+		{
+			plugin.Reply(player, "copy_target_not_ready");
+			return;
+		}
+
+		var weapon = target.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
+		if (weapon == null || !weapon.IsValid)
+		{
+			plugin.Reply(player, "copy_no_weapon");
+			return;
+		}
+
+		var defIndex = (int)weapon.AttributeManager.Item.ItemDefinitionIndex;
+		var isKnife = KnifeService.IsKnifeClass(weapon.DesignerName);
+		if (!isKnife && !plugin.Catalog.Paints.ContainsKey(defIndex))
+		{
+			plugin.Reply(player, "copy_no_weapon");
+			return;
+		}
+
+		var sourceSide = sourceLoadout.For(target.Team);
+		if (!sourceSide.Weapons.TryGetValue(defIndex, out var sourceEntry) || (!isKnife && sourceEntry.Paint <= 0))
+		{
+			plugin.Reply(player, "copy_no_skin");
+			return;
+		}
+
+		var loadout = plugin.Cache.Get(player);
+		if (loadout == null)
+			return;
+
+		var copyDecorations = plugin.StickersAllowed(player);
+		var stripped = !copyDecorations && (sourceEntry.Stickers.Count > 0 || sourceEntry.Charm != null);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var side = loadout.For(team);
+			if (isKnife)
+				side.Knife = defIndex;
+
+			var entry = side.Equip(defIndex, sourceEntry.Paint);
+			CopyEntry(entry, sourceEntry, copyDecorations);
+			if (isKnife)
+				entry.Wear = Math.Max(entry.Wear, KnifeService.MinimumWear);
+			plugin.Save(isKnife
+				? plugin.Store.SaveGeneratedKnife(player.SteamID, team, defIndex, entry)
+				: plugin.Store.SaveGeneratedWeapon(player.SteamID, team, defIndex, entry));
+		}
+
+		plugin.Reply(player, "copy_applied", GenName(defIndex, sourceEntry.Paint), target.PlayerName);
+		if (stripped)
+			plugin.Reply(player, "copy_stickers_stripped");
+	}
+
+	private static CCSPlayerController? SpectatedPlayer(CCSPlayerController player)
+	{
+		var observed = player.ObserverPawn.Value?.ObserverServices?.ObserverTarget.Value;
+		if (observed == null || !observed.IsValid)
+			observed = player.PlayerPawn.Value?.ObserverServices?.ObserverTarget.Value;
+		if (observed == null || !observed.IsValid || observed.DesignerName != "player")
+			return null;
+
+		var pawn = new CCSPlayerPawn(observed.Handle);
+		if (!pawn.IsValid || pawn.Controller.Value is not { IsValid: true } controller)
+			return null;
+
+		var target = new CCSPlayerController(controller.Handle);
+		if (!target.IsValid || target.IsBot || !target.PawnIsAlive ||
+			(target.Team != CsTeam.Terrorist && target.Team != CsTeam.CounterTerrorist) ||
+			target.SteamID == 0 || target.SteamID == player.SteamID)
+			return null;
+
+		return target;
+	}
+
+	private static void CopyEntry(WeaponEntry target, WeaponEntry source, bool copyDecorations)
+	{
+		target.Paint = source.Paint;
+		target.Wear = source.Wear;
+		target.Seed = source.Seed;
+		target.NameTag = source.NameTag;
+		target.StatTrak = source.StatTrak;
+		target.Stickers = copyDecorations ? source.Stickers.Select(Clone).ToList() : [];
+		target.Charm = copyDecorations && source.Charm != null ? Clone(source.Charm) : null;
+	}
+
 	private static void FillEntry(WeaponEntry entry, EconItemPreview item)
 	{
 		entry.Wear = item.PaintWear > 0f ? item.PaintWear : 0.000001f;
@@ -377,8 +534,11 @@ public sealed class Commands
 
 	private string GenName(EconItemPreview item)
 	{
-		return plugin.Catalog.FindPaint(item.DefIndex, item.PaintIndex)?.Name ?? plugin.Catalog.WeaponName(item.DefIndex);
+		return GenName(item.DefIndex, item.PaintIndex);
 	}
+
+	private string GenName(int defIndex, int paintIndex) =>
+		plugin.Catalog.FindPaint(defIndex, paintIndex)?.Name ?? plugin.Catalog.WeaponName(defIndex);
 
 	private static List<StickerEntry> MapStickers(List<EconSticker> source)
 	{

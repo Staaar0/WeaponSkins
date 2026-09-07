@@ -7,7 +7,7 @@ namespace WeaponSkins;
 public class SkinsConfig : BasePluginConfig
 {
 	[JsonPropertyName("ConfigVersion")]
-	public override int Version { get; set; } = 4;
+	public override int Version { get; set; } = 5;
 
 	[JsonPropertyName("api")]
 	public ApiConfig Api { get; set; } = new();
@@ -36,6 +36,9 @@ public class SkinsConfig : BasePluginConfig
 
 	[JsonPropertyName("menu")]
 	public MenuConfig Menu { get; set; } = new();
+
+	[JsonPropertyName("vip_commands")]
+	public VipCommandsConfig VipCommands { get; set; } = new();
 
 	[JsonPropertyName("commands")]
 	public CommandsConfig Commands { get; set; } = new();
@@ -126,6 +129,15 @@ public class MenuConfig
 	public float ImageSeconds { get; set; } = 2f;
 }
 
+public class VipCommandsConfig
+{
+	[JsonPropertyName("commands")]
+	public List<string> Commands { get; set; } = ["example-ws", "example-skins", "example-skin"];
+
+	[JsonPropertyName("vip_flag")]
+	public string VipFlag { get; set; } = "@css/vip";
+}
+
 public class CommandsConfig
 {
 	[JsonPropertyName("skins")]
@@ -163,6 +175,9 @@ public class CommandsConfig
 
 	[JsonPropertyName("gen")]
 	public List<string> Gen { get; set; } = ["g", "gen"];
+
+	[JsonPropertyName("copy")]
+	public List<string> Copy { get; set; } = ["cp", "copy"];
 
 	[JsonPropertyName("reload")]
 	public List<string> Reload { get; set; } = ["ws_reload"];

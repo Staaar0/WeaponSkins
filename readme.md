@@ -82,6 +82,7 @@ A CSSharp plugin for CS2 that gives players full control over how their loadout 
 | `!st` | Toggle StatTrak |
 | `!g <code>` | Apply a gen code |
 | `!link` | Get a Discord link code |
+| `!cp` | Copies the held skin of the spectated player |
 
 Command names can be changed in the config, except `!link`.
 
@@ -106,7 +107,7 @@ Command names can be changed in the config, except `!link`.
 ## Default Config
 ```json
 {
-  "ConfigVersion": 4,
+  "ConfigVersion": 5,
   "api": {
     "base_url": "https://cdn.jsdelivr.net/gh/ByMykel/CSGO-API@main/public/api",
     "language": "en",
@@ -137,6 +138,14 @@ Command names can be changed in the config, except `!link`.
     "items_per_page": 4,
     "show_image": true,
     "image_seconds": 2
+  },
+  "vip_commands": {
+    "commands": [
+      "example-ws",
+      "example-skins",
+      "example-skin"
+    ],
+    "vip_flag": "@css/vip"
   },
   "commands": {
     "skins": [
@@ -187,6 +196,10 @@ Command names can be changed in the config, except `!link`.
     "gen": [
       "g",
       "gen"
+    ],
+    "copy": [
+      "cp",
+      "copy"
     ],
     "reload": [
       "ws_reload"
