@@ -142,8 +142,8 @@ Command names can be changed in the config, except `!link`.
   "vip_commands": {
     "commands": [
       "example-ws",
-      "example-skins",
-      "example-skin"
+      "example-agents",
+      "example-music"
     ],
     "vip_flag": "@css/vip"
   },
