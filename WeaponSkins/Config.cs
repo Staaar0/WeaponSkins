@@ -132,7 +132,7 @@ public class MenuConfig
 public class VipCommandsConfig
 {
 	[JsonPropertyName("commands")]
-	public List<string> Commands { get; set; } = ["example-ws", "example-skins", "example-skin"];
+	public List<string> Commands { get; set; } = ["example-ws", "example-agents", "example-music"];
 
 	[JsonPropertyName("vip_flag")]
 	public string VipFlag { get; set; } = "@css/vip";
