@@ -419,7 +419,7 @@ public sealed class Events
 
 		plugin.Profile.ApplyAgent(player);
 		plugin.Applier.BumpAllRenderWear(player);
-		plugin.GloveApply.Apply(player, false, refresh: false);
+		plugin.GloveApply.Apply(player, true, refresh: false);
 		plugin.Applier.RefreshAll(player);
 	}
 }

@@ -294,7 +294,6 @@ public sealed class LinkService
 				if (UsesDiscordUtilities)
 				{
 					Server.NextFrame(SyncDiscordUtilities);
-					continue;
 				}
 
 				if (CanIssueCodes)

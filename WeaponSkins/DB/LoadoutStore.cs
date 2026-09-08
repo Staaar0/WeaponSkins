@@ -56,6 +56,16 @@ public sealed class LoadoutStore
 
 	private static TeamLoadout Side(PlayerLoadout loadout, sbyte team) => team == 3 ? loadout.CT : loadout.T;
 
+    private static string NormalizeAgentModel(string model)
+    {
+        string path=model.Trim();
+        foreach(string prefix in new[]{"characters/models/","agents/models/"})
+            if(path.StartsWith(prefix,StringComparison.Ordinal))path=path[prefix.Length..];
+        if(path.EndsWith(".vmdl",StringComparison.Ordinal))path=path[..^5];
+        if(path.Length==0 || path.Contains("..") || path.Contains('\\') || path.StartsWith('/'))return "";
+        return "agents/models/"+path+".vmdl";
+    }
+
 	public async Task<PlayerLoadout> Load(ulong steamId, CancellationToken cancellationToken = default)
 	{
 		var loadout = new PlayerLoadout();
@@ -154,7 +164,7 @@ public sealed class LoadoutStore
 
 		await reader.NextResultAsync(cancellationToken);
 		while (await reader.ReadAsync(cancellationToken))
-			Side(loadout, reader.GetSByte(0)).AgentModel = reader.GetString(1);
+			Side(loadout, reader.GetSByte(0)).AgentModel = NormalizeAgentModel(reader.GetString(1));
 
 		await reader.NextResultAsync(cancellationToken);
 		while (await reader.ReadAsync(cancellationToken))

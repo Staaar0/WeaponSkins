@@ -13,9 +13,10 @@ namespace WeaponSkins;
 [MinimumApiVersion(371)]
 public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 {
+    public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.1";
+	public override string ModuleVersion => "1.1.2";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -130,6 +131,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	public override void Load(bool hotReload)
 	{
+        Instance = this;
 		EconAttributes.Init(Logger);
 
 		Db = new Database(Config.Database);
@@ -301,6 +303,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	public override void Unload(bool hotReload)
 	{
 		stopping = true;
+        if (ReferenceEquals(Instance, this)) Instance = null;
 		events?.Unregister();
 		statTrakFlushCancellation?.Cancel();
 		discordBot?.Stop();
