@@ -23,6 +23,7 @@ public sealed class WeaponApplier
 
 	private readonly Dictionary<(int Slot, int DefIndex), AppliedState> appliedStates = [];
 	private readonly HashSet<int> refreshing = [];
+	private readonly Dictionary<int, RefreshWindow> refreshWindows = [];
 	private readonly Dictionary<int, List<string?>> pendingRefreshes = [];
 	private readonly Dictionary<int, int> lifeRevisions = [];
 	private readonly Dictionary<int, int> activeRefreshRevisions = [];
@@ -445,6 +446,12 @@ public sealed class WeaponApplier
 		var playerSlot = player.Slot;
 		if (!refreshing.Add(playerSlot))
 		{
+			if (refreshWindows.TryGetValue(playerSlot, out var active) &&
+				active.TryAbsorb(slotCommand, includeKnife,
+					player.PlayerPawn.Value?.WeaponServices?.MyWeapons.Select(handle => handle.Raw) ?? [],
+					pendingRefreshes.TryGetValue(playerSlot, out var queuedRefreshes) && queuedRefreshes.Count > 0))
+				return;
+
 			if (!pendingRefreshes.TryGetValue(playerSlot, out var pending))
 				pendingRefreshes[playerSlot] = pending = [];
 
@@ -464,11 +471,14 @@ public sealed class WeaponApplier
 		var weapons = pawn?.WeaponServices?.MyWeapons;
 		if (pawn == null || !pawn.IsValid || weapons == null || player.Team is CsTeam.None or CsTeam.Spectator)
 		{
+			refreshWindows.Remove(playerSlot);
 			refreshing.Remove(playerSlot);
 			return;
 		}
 
 		var context = BeginRefresh(player, pawn);
+		var window = new RefreshWindow(slotCommand, includeKnife, weapons.Select(handle => handle.Raw));
+		refreshWindows[playerSlot] = window;
 		var restoreSlotCommand = slotCommand ?? GetSlotCommand(pawn.WeaponServices?.ActiveWeapon.Value);
 		var hasKnife = false;
 		List<uint> weaponsToKill = [];
@@ -539,6 +549,7 @@ public sealed class WeaponApplier
 
 		plugin.AddTimer(0.23f, () =>
 		{
+			window.Close();
 			if (refreshCancelled)
 				return;
 
@@ -690,6 +701,7 @@ public sealed class WeaponApplier
 			return;
 
 		activeRefreshRevisions.Remove(context.Slot);
+		refreshWindows.Remove(context.Slot);
 		refreshing.Remove(context.Slot);
 		pendingRefreshes.Remove(context.Slot);
 	}
@@ -771,6 +783,7 @@ public sealed class WeaponApplier
 		if (!pendingRefreshes.TryGetValue(context.Slot, out var pending) || pending.Count == 0)
 		{
 			activeRefreshRevisions.Remove(context.Slot);
+			refreshWindows.Remove(context.Slot);
 			refreshing.Remove(context.Slot);
 			return;
 		}
@@ -793,6 +806,7 @@ public sealed class WeaponApplier
 			if (!pendingRefreshes.TryGetValue(context.Slot, out var queued) || queued.Count == 0)
 			{
 				activeRefreshRevisions.Remove(context.Slot);
+				refreshWindows.Remove(context.Slot);
 				refreshing.Remove(context.Slot);
 				return;
 			}
@@ -803,6 +817,7 @@ public sealed class WeaponApplier
 				pendingRefreshes.Remove(context.Slot);
 
 			activeRefreshRevisions.Remove(context.Slot);
+			refreshWindows.Remove(context.Slot);
 			refreshing.Remove(context.Slot);
 			RefreshAll(current, nextSlot, nextSlot == "slot2" && PlayerHasGlock(current));
 		}, TimerFlags.STOP_ON_MAPCHANGE);
@@ -891,6 +906,7 @@ public sealed class WeaponApplier
 		ForgetAppliedStates(slot);
 		lifeRevisions[slot] = unchecked(lifeRevisions.GetValueOrDefault(slot) + 1);
 		activeRefreshRevisions.Remove(slot);
+		refreshWindows.Remove(slot);
 		refreshing.Remove(slot);
 		pendingRefreshes.Remove(slot);
 	}
@@ -901,6 +917,7 @@ public sealed class WeaponApplier
 		stickerWear.Remove(slot);
 		lifeRevisions.Remove(slot);
 		activeRefreshRevisions.Remove(slot);
+		refreshWindows.Remove(slot);
 		refreshing.Remove(slot);
 		pendingRefreshes.Remove(slot);
 	}
@@ -911,6 +928,7 @@ public sealed class WeaponApplier
 		appliedStates.Clear();
 		lifeRevisions.Clear();
 		activeRefreshRevisions.Clear();
+		refreshWindows.Clear();
 		refreshing.Clear();
 		pendingRefreshes.Clear();
 		patternSeed = 1;

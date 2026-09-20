@@ -1,3 +1,4 @@
+using SharedEconPreview = global::WeaponSkins.EconItemPreview;
 using System.Globalization;
 using Discord;
 using Discord.WebSocket;
@@ -8,7 +9,7 @@ using WeaponSkinsBot.Discord;
 
 namespace WeaponSkinsBot;
 
-public sealed class BotApp
+public sealed partial class BotApp
 {
 	private const string Branding = "WeaponSkins | By ✪ Stαr";
 	private readonly string token;
@@ -17,6 +18,11 @@ public sealed class BotApp
 	private readonly global::WeaponSkins.ApiConfig apiConfig;
 	private readonly ILogger logger;
 	private readonly Action connected;
+    private readonly Action<ulong> loadoutChanged;
+    private readonly Func<ulong, CancellationToken, Task<WeaponSkinsDatabase.Permissions>> livePermissions;
+    private CancellationToken cancellationToken;
+    private InteractionDispatcher dispatcher = null!;
+    private readonly SemaphoreSlim botOperations = new(4, 4);
 	private DiscordSocketClient client = null!;
 	private CatalogService catalog = null!;
 	private PickerService picker = null!;
@@ -75,7 +81,9 @@ public sealed class BotApp
 		string moduleDirectory,
 		global::WeaponSkins.ApiConfig apiConfig,
 		ILogger logger,
-		Action connected)
+		Action connected,
+        Action<ulong> loadoutChanged,
+        Func<ulong, CancellationToken, Task<WeaponSkinsDatabase.Permissions>> livePermissions)
 	{
 		this.token = token;
 		sourceDatabase = database;
@@ -83,19 +91,25 @@ public sealed class BotApp
 		this.apiConfig = apiConfig;
 		this.logger = logger;
 		this.connected = connected;
+        this.loadoutChanged = loadoutChanged;
+        this.livePermissions = livePermissions;
 	}
 
 	public async Task RunAsync(CancellationToken cancellationToken)
 	{
 		try
 		{
-			database = new WeaponSkinsDatabase(sourceDatabase);
+			this.cancellationToken = cancellationToken;
+            dispatcher = new InteractionDispatcher(logger, cancellationToken);
+            database = new WeaponSkinsDatabase(sourceDatabase, OnLoadoutChanged, cancellationToken, livePermissions);
+            ownedWeapons = new OwnedWeaponCache(database.GetOwnedWeaponsAsync,
+                ex => logger.LogWarning(ex, "WeaponSkinsBOT could not refresh weapon suggestions"), cancellationToken);
 			catalog = new CatalogService(
 				Path.Combine(moduleDirectory, "BotData", "catalog"),
 				Path.Combine(moduleDirectory, "Data"),
 				apiConfig);
 			await catalog.LoadAsync(cancellationToken);
-			picker = new PickerService(catalog, database);
+			picker = new PickerService(catalog, database, cancellationToken, botOperations);
 
 			client = new DiscordSocketClient(new DiscordSocketConfig
 			{
@@ -105,14 +119,15 @@ public sealed class BotApp
 			});
 
 			client.Log += OnLog;
-			client.Ready += OnReady;
-			client.JoinedGuild += OnJoinedGuild;
-			client.LeftGuild += OnLeftGuild;
-			client.MessageReceived += OnMessage;
-			client.SlashCommandExecuted += OnSlash;
-			client.ButtonExecuted += OnButton;
-			client.SelectMenuExecuted += picker.HandleSelectAsync;
-			client.ModalSubmitted += OnModal;
+			client.Ready += DispatchReady;
+			client.JoinedGuild += DispatchJoined;
+			client.LeftGuild += DispatchLeft;
+			client.MessageReceived += DispatchMessage;
+			client.SlashCommandExecuted += DispatchSlash;
+			client.ButtonExecuted += DispatchButton;
+			client.SelectMenuExecuted += DispatchSelect;
+			client.ModalSubmitted += DispatchModal;
+            client.AutocompleteExecuted += DispatchAutocomplete;
 
 			await client.LoginAsync(TokenType.Bot, token);
 			await client.StartAsync();
@@ -148,21 +163,26 @@ public sealed class BotApp
 		if (client != null)
 		{
 			client.Log -= OnLog;
-			client.Ready -= OnReady;
-			client.JoinedGuild -= OnJoinedGuild;
-			client.LeftGuild -= OnLeftGuild;
-			client.MessageReceived -= OnMessage;
-			client.SlashCommandExecuted -= OnSlash;
-			client.ButtonExecuted -= OnButton;
+			client.Ready -= DispatchReady;
+			client.JoinedGuild -= DispatchJoined;
+			client.LeftGuild -= DispatchLeft;
+			client.MessageReceived -= DispatchMessage;
+			client.SlashCommandExecuted -= DispatchSlash;
+			client.ButtonExecuted -= DispatchButton;
 			if (picker != null)
 			{
-				client.SelectMenuExecuted -= picker.HandleSelectAsync;
-				client.ModalSubmitted -= OnModal;
+				client.SelectMenuExecuted -= DispatchSelect;
+				client.ModalSubmitted -= DispatchModal;
+                client.AutocompleteExecuted -= DispatchAutocomplete;
 			}
 
-			await WithTimeout(client.StopAsync());
+			// Cancellation reaches SQL operations and session gates before disposal.
+            var drained = dispatcher?.StopAsync() ?? Task.CompletedTask;
+            await WithTimeout(drained);
+            await WithTimeout(client.StopAsync());
 			await WithTimeout(client.LogoutAsync());
-			client.Dispose();
+			if (drained.IsCompleted) client.Dispose();
+            else _ = drained.ContinueWith(_ => client.Dispose(), TaskScheduler.Default);
 		}
 
 		catalog?.Dispose();
@@ -352,11 +372,11 @@ public sealed class BotApp
         _ = ExpireOpener(opener);
     }
 
-    private static async Task ExpireOpener(IUserMessage opener)
+    private async Task ExpireOpener(IUserMessage opener)
     {
-        await Task.Delay(TimeSpan.FromMinutes(2));
         try
         {
+            await Task.Delay(TimeSpan.FromMinutes(2), cancellationToken);
             await opener.DeleteAsync();
         }
         catch
@@ -376,7 +396,9 @@ public sealed class BotApp
         }
         catch (Exception ex)
         {
-            payload = new Payload($"WeaponSkins error: {Safe(ex.Message)}", null, null);
+            if (cancellationToken.IsCancellationRequested) return;
+            logger.LogError(ex, "WeaponSkinsBOT prefix command {Command} failed", job.Command);
+            payload = new Payload(ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.", null, null);
         }
 
         await component.FollowupAsync(
@@ -388,6 +410,14 @@ public sealed class BotApp
 
     /// <summary>Runs a ! command and hands back whatever should be shown privately.</summary>
 	private async Task<Payload> BuildPayload(ulong guildId, ulong userId, string command, List<string> args)
+    {
+        // Callers acknowledge first; database concurrency cannot delay Discord's first response.
+        await botOperations.WaitAsync(cancellationToken);
+        try { return await BuildPayloadCore(guildId, userId, command, args); }
+        finally { botOperations.Release(); }
+    }
+
+    private async Task<Payload> BuildPayloadCore(ulong guildId, ulong userId, string command, List<string> args)
 	{
 		switch (command)
 		{
@@ -405,16 +435,11 @@ public sealed class BotApp
                     return Say($"Too many link attempts. Wait {wait} seconds and try again.");
 
 				var result = await database.CompleteLinkAsync(userId, args[0]);
+                if (result.Success) ownedWeapons.Prime(userId, result.SteamId);
                 return Say(result.Message);
             }
 
-            case "unlink":
-            {
-				var removed = await database.UnlinkAsync(userId);
-                return Say(removed
-                    ? "Steam account unlinked. Your saved skins stay, link again with `!link` to use them from Discord."
-                    : "Your Discord account is not linked.");
-            }
+
         }
 
         var context = await LinkedContext(guildId, userId);
@@ -423,6 +448,9 @@ public sealed class BotApp
 
         switch (command)
         {
+            case "unlink":
+                return View(picker.StartUnlink(guildId, userId, context.SteamId));
+
             case "me":
                 return Say($"Linked SteamID: `{context.SteamId}`");
 
@@ -472,7 +500,7 @@ public sealed class BotApp
             case "float":
             {
                 if (!TryWeaponTeamValue(args, out var weapon, out var team, out var raw) ||
-                    !float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var wear) || wear is < 0 or > 1)
+                    !float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var wear) || !float.IsFinite(wear) || wear is < 0 or > 1)
                     return Say("Usage: `!wear <weapon> [t|ct|both] <0-1>`");
                 var ok = await context.Db.SetWearAsync(context.SteamId, TeamFor(weapon, team), weapon.DefIndex, wear, catalog);
                 return Say(ok ? "Wear changed." : "Choose a skin for that weapon first.");
@@ -516,8 +544,9 @@ public sealed class BotApp
                 if (!(await context.Db.PermissionsAsync(context.SteamId)).Stickers)
                     return Say(StickersDenied);
 
+                var allSlots = args.RemoveAll(x => x.Equals("all", StringComparison.OrdinalIgnoreCase)) > 0;
                 var team = TakeTeam(args, TeamTarget.Both);
-                var slot = TakeSlot(args);
+                var slot = allSlots ? -1 : TakeSlot(args);
                 var weaponText = args.Count > 0 ? string.Join(" ", args) : "";
                 var weapon = catalog.FindWeapon(weaponText);
                 if (weapon == null)
@@ -536,7 +565,7 @@ public sealed class BotApp
                     team = parsed;
                     args.RemoveAt(0);
                 }
-                if (!EconItemPreview.TryParse(string.Join(" ", args), out var item))
+                if (!SharedEconPreview.TryParse(string.Join(" ", args), out var item))
                     return Say("Invalid inspect code.");
 
                 // Two separate rules in the plugin: whether gen may be used at all,
@@ -595,7 +624,7 @@ public sealed class BotApp
 
     private static int TakeSlot(List<string> args)
     {
-        for (var i = 0; i < args.Count; i++)
+        for (var i = 1; i < args.Count; i++)
         {
             if (args[i].Equals("all", StringComparison.OrdinalIgnoreCase))
             {
@@ -605,7 +634,7 @@ public sealed class BotApp
             if (int.TryParse(args[i], out var slot) && slot >= 1 && slot <= PickerService.StickerSlots)
             {
                 args.RemoveAt(i);
-                return slot - 1;
+                return slot;
             }
         }
         return 0;
@@ -765,12 +794,15 @@ public sealed class BotApp
                 components: payload.Components,
                 ephemeral: true);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
+            logger.LogError(ex, "WeaponSkinsBOT slash command {Command} failed", command.CommandName);
+            var error = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.";
             if (command.HasResponded)
-                await command.FollowupAsync($"WeaponSkins error: {Safe(ex.Message)}", ephemeral: true);
+                await command.FollowupAsync(error, ephemeral: true);
             else
-                await command.RespondAsync($"WeaponSkins error: {Safe(ex.Message)}", ephemeral: true);
+                await command.RespondAsync(error, ephemeral: true);
         }
     }
 
@@ -803,20 +835,25 @@ public sealed class BotApp
                 return;
 
             await component.DeferAsync();
-            var linked = await LinkedContext(component.GuildId ?? 0, component.User.Id);
-            if (!linked.Ok)
+            await botOperations.WaitAsync(cancellationToken);
+            try
             {
-                await component.FollowupAsync(linked.Error, ephemeral: true);
+                var linked = await LinkedContext(component.GuildId ?? 0, component.User.Id);
+                if (!linked.Ok)
+                {
+                    await component.FollowupAsync(linked.Error, ephemeral: true);
+                    return;
+                }
+
+                var paged = await LoadoutPayload(linked, page);
+                await component.ModifyOriginalResponseAsync(message =>
+                {
+                    message.Embed = paged.Embed;
+                    message.Components = paged.Components;
+                });
                 return;
             }
-
-            var paged = await LoadoutPayload(linked, page);
-            await component.ModifyOriginalResponseAsync(message =>
-            {
-                message.Embed = paged.Embed;
-                message.Components = paged.Components;
-            });
-            return;
+            finally { botOperations.Release(); }
         }
 
         if (component.Data.CustomId.StartsWith("open:", StringComparison.Ordinal))
@@ -869,6 +906,7 @@ public sealed class BotApp
 		var steamId = await database.GetSteamIdAsync(discordId);
 		if (!steamId.HasValue)
 			return new Linked(false, guildId, 0, database, "Your Steam account is not linked. Join the CS2 server, type `!link`, then use `/link CODE` here.");
+		ownedWeapons.Prime(discordId, steamId.Value);
 		return new Linked(true, guildId, steamId.Value, database, "");
 	}
 
@@ -882,13 +920,33 @@ public sealed class BotApp
         if (args.Count < 2)
             return false;
 
-        team = TakeTeam(args, TeamTarget.Both);
-        if (args.Count < 2)
-            return false;
-
+        // The final argument is a value, even when it is 0, 2, 3 or a team word in a nametag.
         value = args[^1];
-        weapon = catalog.FindAnyWeapon(string.Join(" ", args.Take(args.Count - 1)))!;
-        return weapon != null;
+        var weaponArgs = args.Take(args.Count - 1).ToList();
+        weapon = catalog.FindAnyWeapon(string.Join(" ", weaponArgs))!;
+        if (weapon != null) return true;
+
+        // Resolve a complete weapon first so numeric weapon IDs cannot be consumed as teams.
+        for (var i = weaponArgs.Count - 1; weaponArgs.Count > 1 && i >= 0; i--)
+        {
+            if (!TeamTargetExtensions.TryParse(weaponArgs[i], out var parsed)) continue;
+            weapon = catalog.FindAnyWeapon(string.Join(" ", weaponArgs.Where((_, index) => index != i)))!;
+            if (weapon == null) continue;
+            team = parsed;
+            return true;
+        }
+        // Preserve prefix-command callers that put the optional team after the value.
+        if (args.Count > 2 && TeamTargetExtensions.TryParse(args[^1], out var trailingTeam))
+        {
+            weapon = catalog.FindAnyWeapon(string.Join(" ", args.Take(args.Count - 2)))!;
+            if (weapon != null)
+            {
+                team = trailingTeam;
+                value = args[^2];
+                return true;
+            }
+        }
+        return false;
     }
 
     private static bool TryBool(string value, out bool result)
@@ -924,7 +982,7 @@ public sealed class BotApp
         .WithDescription("Link your Steam account and manage WeaponSkins from Discord. Slash commands and `!` commands are supported.")
         .AddField("Link", "Join CS2 → type `!link` → use `/link CODE` or `!link CODE` here. `/unlink` undoes it.")
         .AddField("Cosmetics", "`/skins`, `/knife`, `/gloves`, `/agents`, `/music`, `/pins`, `/stickers`, `/loadout`")
-		.AddField("Settings", "`/wear`, `/seed`, `/nametag`, `/stattrak`, `/gen`\nSkins ask for pattern, wear, StatTrak and stickers before saving.")
+		.AddField("Settings", "`/wear`, `/seed`, `/nametag`, `/stattrak`, `/gen`\nChoose a category, weapon and skin. Edit wear, pattern, nametag and StatTrak in the preview, then press Save. Use /stickers for sticker slots, search and removal.")
 		.WithFooter(Branding)
 		.Build();
 
@@ -943,9 +1001,10 @@ public sealed class BotApp
             yield return KnifeCommand(alias);
 
         yield return TeamOnly("gloves", "Choose gloves");
-        yield return TeamOnly("agents", "Choose an agent");
+        yield return TeamOnly("agents", "Choose an agent", false);
         yield return new SlashCommandBuilder().WithName("music").WithDescription("Choose a music kit");
         yield return new SlashCommandBuilder().WithName("pins").WithDescription("Choose a pin");
+        yield return new SlashCommandBuilder().WithName("pin").WithDescription("Choose a pin");
         yield return WeaponValueCommand("wear", "Change skin wear", ApplicationCommandOptionType.Number, "Wear from 0 to 1");
         yield return WeaponValueCommand("seed", "Change skin pattern", ApplicationCommandOptionType.Integer, "Pattern from 0 to 1000");
 
@@ -953,52 +1012,34 @@ public sealed class BotApp
             .AddOption(new SlashCommandOptionBuilder().WithName("text").WithDescription("Name tag or - to remove").WithType(ApplicationCommandOptionType.String).WithRequired(true));
         yield return WeaponTeamBase("stattrak", "Enable or disable StatTrak")
             .AddOption(new SlashCommandOptionBuilder().WithName("enabled").WithDescription("Enable StatTrak").WithType(ApplicationCommandOptionType.Boolean).WithRequired(true));
-        yield return WeaponTeamBase("stickers", "Choose stickers, with search in the menu")
-            .AddOption(SlotOption());
+        yield return WeaponTeamBase("stickers", "Choose stickers, with search in the menu");
         yield return new SlashCommandBuilder().WithName("gen").WithDescription("Apply a CS2 inspect code")
-            .AddOption(TeamOption())
             .AddOption(new SlashCommandOptionBuilder().WithName("code").WithDescription("Inspect code or preview URL").WithType(ApplicationCommandOptionType.String).WithRequired(true));
     }
 
-    private SlashCommandBuilder SkinCommand(string name)
-    {
-        var builder = new SlashCommandBuilder().WithName(name).WithDescription("Choose a weapon skin");
-        var category = new SlashCommandOptionBuilder().WithName("category").WithDescription("Weapon category").WithType(ApplicationCommandOptionType.String).WithRequired(false);
-        foreach (var item in catalog.Categories.Take(25))
-            category.AddChoice(item, item);
-        builder.AddOption(category);
-        builder.AddOption(TeamOption());
-        return builder;
-    }
+    private static SlashCommandBuilder SkinCommand(string name) =>
+        new SlashCommandBuilder().WithName(name).WithDescription("Choose a weapon skin").AddOption(TeamOption(false));
 
-    private static SlashCommandBuilder KnifeCommand(string name) => new SlashCommandBuilder().WithName(name).WithDescription("Choose a knife and skin")
-        .AddOption(TeamOption())
-        .AddOption(new SlashCommandOptionBuilder().WithName("weapon").WithDescription("Optional knife name, e.g. Karambit").WithType(ApplicationCommandOptionType.String).WithRequired(false));
+    private static SlashCommandBuilder KnifeCommand(string name) =>
+        new SlashCommandBuilder().WithName(name).WithDescription("Choose a knife and skin").AddOption(TeamOption());
 
-    private static SlashCommandBuilder TeamOnly(string name, string description) => new SlashCommandBuilder().WithName(name).WithDescription(description).AddOption(TeamOption());
+    private static SlashCommandBuilder TeamOnly(string name, string description, bool both = true) =>
+        new SlashCommandBuilder().WithName(name).WithDescription(description).AddOption(TeamOption(both));
 
-    private static SlashCommandBuilder WeaponTeamBase(string name, string description) => new SlashCommandBuilder().WithName(name).WithDescription(description)
-        .AddOption(new SlashCommandOptionBuilder().WithName("weapon").WithDescription("Weapon name").WithType(ApplicationCommandOptionType.String).WithRequired(true))
-        .AddOption(TeamOption());
+    private static SlashCommandBuilder WeaponTeamBase(string name, string description) =>
+        new SlashCommandBuilder().WithName(name).WithDescription(description)
+            .AddOption(new SlashCommandOptionBuilder().WithName("weapon").WithDescription("Choose one of your equipped custom skins")
+                .WithType(ApplicationCommandOptionType.String).WithRequired(true).WithAutocomplete(true));
 
     private static SlashCommandBuilder WeaponValueCommand(string name, string description, ApplicationCommandOptionType type, string valueDescription) =>
         WeaponTeamBase(name, description).AddOption(new SlashCommandOptionBuilder().WithName("value").WithDescription(valueDescription).WithType(type).WithRequired(true));
 
-    // Optional: a weapon only one team can carry picks its own side, and the rest
-    // default to both, so nobody has to answer a question they do not care about.
-    private static SlashCommandOptionBuilder TeamOption() => new SlashCommandOptionBuilder()
-        .WithName("team").WithDescription("T, CT, or Both (skipped for one-team weapons)").WithType(ApplicationCommandOptionType.String).WithRequired(false)
-        .AddChoice("Both", "both").AddChoice("T", "t").AddChoice("CT", "ct");
-
-    private static SlashCommandOptionBuilder SlotOption()
+    private static SlashCommandOptionBuilder TeamOption(bool both = true)
     {
-        var slot = new SlashCommandOptionBuilder()
-            .WithName("slot").WithDescription($"Sticker slot 1-{PickerService.StickerSlots}, or all of them")
-            .WithType(ApplicationCommandOptionType.String).WithRequired(false)
-            .AddChoice("All slots", "all");
-        for (var index = 1; index <= PickerService.StickerSlots; index++)
-            slot.AddChoice($"Slot {index}", index.ToString());
-        return slot;
+        var option = new SlashCommandOptionBuilder().WithName("team").WithDescription("Team")
+            .WithType(ApplicationCommandOptionType.String).WithRequired(true);
+        if (both) option.AddChoice("Both", "both");
+        return option.AddChoice("Terrorist", "t").AddChoice("Counter-Terrorist", "ct");
     }
 
 	private static string Safe(string text) => text.Length <= 500 ? text : text[..500];

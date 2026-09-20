@@ -160,8 +160,13 @@ public sealed class PlayerCache
 
 	public static List<CsTeam> TargetTeams(CCSPlayerController player)
 	{
-		return player.Team is CsTeam.Terrorist or CsTeam.CounterTerrorist
-			? [player.Team]
+		return TargetTeams(player.Team);
+	}
+
+	public static List<CsTeam> TargetTeams(CsTeam team)
+	{
+		return team is CsTeam.Terrorist or CsTeam.CounterTerrorist
+			? [team]
 			: [CsTeam.Terrorist, CsTeam.CounterTerrorist];
 	}
 

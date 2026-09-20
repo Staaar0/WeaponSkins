@@ -29,6 +29,7 @@ public sealed class Events
 	public void RegisterPrecache()
 	{
 		plugin.RegisterListener<Listeners.OnServerPrecacheResources>(OnPrecacheResources);
+		plugin.RegisterListener<Listeners.OnMapStart>(OnMapStart);
 	}
 
 	public void Register()
@@ -37,7 +38,6 @@ public sealed class Events
 			return;
 
 		plugin.RegisterListener<Listeners.OnTick>(OnTick);
-		plugin.RegisterListener<Listeners.OnMapStart>(OnMapStart);
 		plugin.RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
 		plugin.RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
 		plugin.RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
@@ -370,19 +370,7 @@ public sealed class Events
 		if (plugin.Catalog.Loaded)
 			return;
 
-		Task.Run(async () =>
-		{
-			try
-			{
-				await plugin.Catalog.LoadAsync(plugin.Config.Api, plugin.Db.Configured);
-				if (plugin.Catalog.Loaded)
-					plugin.Menus.Prewarm();
-			}
-			catch (Exception ex)
-			{
-				plugin.Logger.LogError("Item data load failed: {Error}", ex.Message);
-			}
-		});
+		plugin.RequestCatalogLoad();
 	}
 
 	private void OnPrecacheResources(ResourceManifest manifest)

@@ -177,7 +177,9 @@ public sealed class DiscordBotCoordinator
 			plugin.ModuleDirectory,
 			plugin.Config.Api,
 			plugin.Logger,
-			WeaponSkins.PrintDiscordBotConnected);
+			WeaponSkins.PrintDiscordBotConnected,
+            steamId => plugin.Links?.WakeSync(steamId),
+            plugin.DiscordPermissionsAsync);
 		botTask = bot.RunAsync(botCancellation.Token);
 	}
 

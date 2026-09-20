@@ -23,7 +23,7 @@ public sealed class Commands
 		vipCommands.Clear();
 		foreach (var command in plugin.Config.VipCommands.Commands)
 		{
-			var normalized = NormalizeCommand(command);
+			var normalized = CommandPolicy.Normalize(command);
 			if (normalized.Length > 0)
 				vipCommands.Add(normalized);
 		}
@@ -65,7 +65,7 @@ public sealed class Commands
 		if (names.Count == 0)
 			return;
 
-		var vipOnly = names.Any(alias => vipCommands.Contains(NormalizeCommand(alias)));
+		var vipOnly = CommandPolicy.IsVipOnly(names, vipCommands);
 		var callback = vipOnly ? VipGate(handler) : handler;
 		foreach (var alias in names)
 			plugin.AddCommand($"css_{alias}", description, callback);
@@ -93,15 +93,6 @@ public sealed class Commands
 		};
 	}
 
-	private static string NormalizeCommand(string command)
-	{
-		var normalized = command.Trim();
-		while (normalized.StartsWith('!') || normalized.StartsWith('/'))
-			normalized = normalized[1..];
-		if (normalized.StartsWith("css_", StringComparison.OrdinalIgnoreCase))
-			normalized = normalized[4..];
-		return normalized;
-	}
 
 	private CCSPlayerController? Ready(CCSPlayerController? player)
 	{
@@ -367,7 +358,7 @@ public sealed class Commands
 			side.Knife = item.DefIndex;
 
 			var entry = side.Equip(item.DefIndex, item.PaintIndex);
-			FillEntry(entry, item);
+			CosmeticRules.FillEntry(entry, item);
 			entry.Wear = Math.Max(entry.Wear, KnifeService.MinimumWear);
 			entry.Stickers.Clear();
 			entry.Charm = null;
@@ -398,15 +389,15 @@ public sealed class Commands
 	{
 		var allowed = plugin.StickersAllowed(player);
 		var stripped = !allowed && (item.Stickers.Count > 0 || item.Keychains.Count > 0);
-		var stickers = allowed ? MapStickers(item.Stickers) : [];
-		var charm = allowed ? MapCharm(item.Keychains) : null;
+		var stickers = allowed ? CosmeticRules.MapStickers(item.Stickers) : [];
+		var charm = allowed ? CosmeticRules.MapCharm(item.Keychains) : null;
 
 		foreach (var team in PlayerCache.TargetTeams(player))
 		{
 			var entry = loadout.For(team).Equip(item.DefIndex, item.PaintIndex);
-			FillEntry(entry, item);
-			entry.Stickers = stickers.Select(Clone).ToList();
-			entry.Charm = charm == null ? null : Clone(charm);
+			CosmeticRules.FillEntry(entry, item);
+			entry.Stickers = stickers.Select(CosmeticRules.Clone).ToList();
+			entry.Charm = charm == null ? null : CosmeticRules.Clone(charm);
 			plugin.Save(plugin.Store.SaveGeneratedWeapon(player.SteamID, team, item.DefIndex, entry));
 		}
 
@@ -479,7 +470,7 @@ public sealed class Commands
 				side.Knife = defIndex;
 
 			var entry = side.Equip(defIndex, sourceEntry.Paint);
-			CopyEntry(entry, sourceEntry, copyDecorations);
+			CosmeticRules.CopyEntry(entry, sourceEntry, copyDecorations);
 			if (isKnife)
 				entry.Wear = Math.Max(entry.Wear, KnifeService.MinimumWear);
 			plugin.Save(isKnife
@@ -513,24 +504,7 @@ public sealed class Commands
 		return target;
 	}
 
-	private static void CopyEntry(WeaponEntry target, WeaponEntry source, bool copyDecorations)
-	{
-		target.Paint = source.Paint;
-		target.Wear = source.Wear;
-		target.Seed = source.Seed;
-		target.NameTag = source.NameTag;
-		target.StatTrak = source.StatTrak;
-		target.Stickers = copyDecorations ? source.Stickers.Select(Clone).ToList() : [];
-		target.Charm = copyDecorations && source.Charm != null ? Clone(source.Charm) : null;
-	}
 
-	private static void FillEntry(WeaponEntry entry, EconItemPreview item)
-	{
-		entry.Wear = item.PaintWear > 0f ? item.PaintWear : 0.000001f;
-		entry.Seed = item.PaintSeed;
-		entry.NameTag = item.CustomName is { Length: > 0 } name ? (name.Length > 64 ? name[..64] : name) : null;
-		entry.StatTrak = item.StatTrak ? Math.Max(item.KillEaterValue, 0) : -1;
-	}
 
 	private string GenName(EconItemPreview item)
 	{
@@ -540,111 +514,8 @@ public sealed class Commands
 	private string GenName(int defIndex, int paintIndex) =>
 		plugin.Catalog.FindPaint(defIndex, paintIndex)?.Name ?? plugin.Catalog.WeaponName(defIndex);
 
-	private static List<StickerEntry> MapStickers(List<EconSticker> source)
-	{
-		const int slots = 6;
-		var result = new List<StickerEntry>();
-		var used = new bool[slots];
-		var nextFree = 0;
-		var nextZero = 4;
 
-		foreach (var sticker in source)
-		{
-			if (sticker.Id <= 0 || sticker.Slot < 0 || sticker.Slot > 31 || result.Count >= 5)
-				continue;
 
-			var origin = sticker.Slot;
-			var slot = origin;
-			var schema = 0;
-
-			if (origin >= slots || used[origin])
-			{
-				schema = origin;
-
-				if (origin == 0)
-				{
-					while (nextZero < slots && used[nextZero])
-						nextZero++;
-
-					slot = nextZero < slots ? nextZero++ : TakeFreeSlot(used, ref nextFree);
-				}
-				else
-				{
-					slot = TakeFreeSlot(used, ref nextFree);
-				}
-
-				if (slot < 0)
-					continue;
-			}
-			else if (origin >= 4)
-			{
-				schema = origin;
-			}
-
-			used[slot] = true;
-			result.Add(new StickerEntry
-			{
-				Slot = slot,
-				Id = sticker.Id,
-				Wear = sticker.Wear,
-				Scale = sticker.Scale == 0f ? 1f : sticker.Scale,
-				Rotation = sticker.Rotation,
-				OffsetX = sticker.OffsetX,
-				OffsetY = sticker.OffsetY,
-				Schema = schema
-			});
-		}
-
-		return result;
-	}
-
-	private static int TakeFreeSlot(bool[] used, ref int cursor)
-	{
-		while (cursor < used.Length && used[cursor])
-			cursor++;
-		return cursor < used.Length ? cursor++ : -1;
-	}
-
-	private static CharmEntry? MapCharm(List<EconSticker> keychains)
-	{
-		var charm = keychains.FirstOrDefault(k => k.Id > 0);
-		if (charm == null)
-			return null;
-
-		return new CharmEntry
-		{
-			Id = charm.Id,
-			Pattern = charm.Pattern,
-			Sticker = charm.Sticker,
-			Highlight = charm.Highlight,
-			OffsetX = charm.OffsetX,
-			OffsetY = charm.OffsetY,
-			OffsetZ = charm.OffsetZ
-		};
-	}
-
-	private static StickerEntry Clone(StickerEntry source) => new()
-	{
-		Slot = source.Slot,
-		Id = source.Id,
-		Wear = source.Wear,
-		Scale = source.Scale,
-		Rotation = source.Rotation,
-		OffsetX = source.OffsetX,
-		OffsetY = source.OffsetY,
-		Schema = source.Schema
-	};
-
-	private static CharmEntry Clone(CharmEntry source) => new()
-	{
-		Id = source.Id,
-		Pattern = source.Pattern,
-		Sticker = source.Sticker,
-		Highlight = source.Highlight,
-		OffsetX = source.OffsetX,
-		OffsetY = source.OffsetY,
-		OffsetZ = source.OffsetZ
-	};
 
 	private void OnReload(CCSPlayerController? caller, CommandInfo info)
 	{
@@ -661,29 +532,14 @@ public sealed class Commands
 		}
 
 		var slot = caller?.Slot ?? -1;
-		Task.Run(async () =>
+		var steamId = caller?.SteamID ?? 0;
+		plugin.RequestCatalogLoad(loaded =>
 		{
-			var loaded = false;
-			try
-			{
-				await plugin.Catalog.LoadAsync(plugin.Config.Api, plugin.Db.Configured);
-				loaded = plugin.Catalog.Loaded;
-			}
-			catch (Exception ex)
-			{
-				plugin.Logger.LogError("Item data reload failed: {Error}", ex.Message);
-			}
-
-			Server.NextFrame(() =>
-			{
-				plugin.Menus.InvalidateCaches();
-				plugin.Menus.Prewarm();
-				var player = slot >= 0 ? Utilities.GetPlayerFromSlot(slot) : null;
-				if (player != null && player.IsValid)
-					plugin.Reply(player, loaded ? "reloaded" : "reload_failed");
-				else
-					plugin.Logger.LogInformation(loaded ? "Item data reloaded" : "Item data reload failed");
-			});
+			var player = slot >= 0 ? Utilities.GetPlayerFromSlot(slot) : null;
+			if (player != null && player.IsValid && player.SteamID == steamId)
+				plugin.Reply(player, loaded ? "reloaded" : "reload_failed");
+			else
+				plugin.Logger.LogInformation(loaded ? "Item data reloaded" : "Item data reload failed");
 		});
 	}
 

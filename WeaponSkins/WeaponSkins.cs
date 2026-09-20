@@ -16,7 +16,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.2";
+	public override string ModuleVersion => "1.1.3";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -67,6 +67,13 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	private Commands? commands;
 	private DiscordBotCoordinator? discordBot;
 	private Task? bootstrapTask;
+	private readonly CancellationTokenSource bootstrapCancellation = new();
+	private readonly CancellationTokenSource catalogCancellation = new();
+	private Task? catalogTask;
+	private bool catalogLoading;
+	private bool databaseReady;
+	private readonly List<Action<bool>> catalogCallbacks = [];
+
 	private CancellationTokenSource? statTrakFlushCancellation;
 	private Task? statTrakFlushTask;
 	private long nextDatabaseErrorLog;
@@ -76,15 +83,11 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	public void OnConfigParsed(SkinsConfig config)
 	{
-		if (config.LinkingMethod == "2" || string.Equals(config.LinkingMethod, "Discord-Utilities", StringComparison.OrdinalIgnoreCase))
-			config.LinkingMethod = "Discord-Utilities";
-		else if (config.LinkingMethod == "1" || string.Equals(config.LinkingMethod, "WeaponSkinsBOT", StringComparison.OrdinalIgnoreCase))
-			config.LinkingMethod = "WeaponSkinsBOT";
-		else
+		if (!LinkPolicy.TryNormalize(config.LinkingMethod, out var method))
 		{
 			Logger.LogWarning("Unknown linking_method '{Method}', using WeaponSkinsBOT", config.LinkingMethod);
-			config.LinkingMethod = "WeaponSkinsBOT";
 		}
+		config.LinkingMethod = method;
 
 		Config = config;
 		UpdateConfigNotes();
@@ -174,20 +177,65 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		else
 		{
 			Logger.LogWarning("Database is not configured, loadouts will not be saved");
+			databaseReady = true;
 			FinishLoad(hotReload);
 		}
 
-		if (!Catalog.LoadBlocking(Config.Api, Db.Configured))
-			Logger.LogWarning("Item data is not loaded yet, retrying on map start");
-		else
-			Menus.Prewarm();
+		RequestCatalogLoad();
+	}
+
+	public void RequestCatalogLoad(Action<bool>? completed = null)
+	{
+		if (stopping) return;
+		if (completed != null) catalogCallbacks.Add(completed);
+		if (catalogLoading) return;
+		catalogLoading = true;
+		var token = catalogCancellation.Token;
+		catalogTask = Task.Run(async () =>
+		{
+			CatalogService.CatalogSnapshot? prepared = null;
+			try { prepared = await Catalog.PrepareAsync(Config.Api, Db.Configured, token); }
+			catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+			catch (Exception ex) { Logger.LogError(ex, "Item data load failed"); }
+			if (token.IsCancellationRequested) return;
+			Server.NextWorldUpdate(() =>
+			{
+				if (stopping) return;
+				catalogLoading = false;
+				if (prepared != null)
+				{
+					// Loading may finish after the map's resource-manifest event.
+					// Precache the completed catalog before making agents selectable.
+					try
+					{
+						foreach (var model in prepared.AgentsT.Concat(prepared.AgentsCT).Select(a => a.Model).Distinct())
+							Server.PrecacheModel(model);
+					}
+					catch (Exception ex)
+					{
+						Logger.LogError(ex, "Could not precache the new agent catalog; keeping the previous catalog");
+						prepared = null;
+					}
+				}
+				if (prepared != null)
+				{
+					Catalog.Publish(prepared);
+					Menus.InvalidateCaches();
+					Menus.Prewarm();
+					FinishLoad(true);
+				}
+				var callbacks = catalogCallbacks.ToArray();
+				catalogCallbacks.Clear();
+				foreach (var callback in callbacks) callback(prepared != null);
+			});
+		}, token);
 	}
 
 	private async Task BootstrapAndLoad()
 	{
 		try
 		{
-			await Db.Bootstrap(Links.CanIssueCodes, DiscordBotEnabled);
+			await Db.Bootstrap(Links.CanIssueCodes, DiscordBotEnabled, bootstrapCancellation.Token);
 			discordBot?.DatabaseReady();
 		}
 		catch (Exception ex)
@@ -198,10 +246,13 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			return;
 		}
 
-		Server.NextFrame(() =>
+		Server.NextWorldUpdate(() =>
 		{
 			if (!stopping)
+			{
+				databaseReady = true;
 				FinishLoad(true);
+			}
 		});
 
 		await BackfillPermissions();
@@ -242,7 +293,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	private void FinishLoad(bool loadConnectedPlayers)
 	{
-		if (initialized || stopping)
+		if (initialized || stopping || !databaseReady || !Catalog.Loaded)
 			return;
 
 		commands!.Register();
@@ -303,6 +354,13 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	public override void Unload(bool hotReload)
 	{
 		stopping = true;
+		bootstrapCancellation.Cancel();
+		catalogCancellation.Cancel();
+		catalogCallbacks.Clear();
+		if (catalogTask != null)
+			_ = catalogTask.ContinueWith(_ => catalogCancellation.Dispose(), TaskScheduler.Default);
+		else
+			catalogCancellation.Dispose();
         if (ReferenceEquals(Instance, this)) Instance = null;
 		events?.Unregister();
 		statTrakFlushCancellation?.Cancel();
@@ -314,24 +372,27 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 		try
 		{
-			bootstrapTask?.GetAwaiter().GetResult();
+			bootstrapTask?.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
 		}
 		catch (Exception ex)
 		{
 			Logger.LogError("Database bootstrap shutdown failed: {Error}", ex.GetBaseException().Message);
 		}
+		finally
+		{
+			if (bootstrapTask != null)
+				_ = bootstrapTask.ContinueWith(t =>
+				{
+					_ = t.Exception;
+					bootstrapCancellation.Dispose();
+				}, TaskScheduler.Default);
+			else
+				bootstrapCancellation.Dispose();
+		}
 
 		try
 		{
-			statTrakFlushTask?.GetAwaiter().GetResult();
-		}
-		catch (OperationCanceledException)
-		{
-		}
-
-		try
-		{
-			Store.FlushStatTrak().GetAwaiter().GetResult();
+			// Stop appends the final counts and bounds the complete write drain.
 			Store.Stop().GetAwaiter().GetResult();
 		}
 		catch (Exception ex)
@@ -340,7 +401,14 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 		finally
 		{
-			statTrakFlushCancellation?.Dispose();
+			if (statTrakFlushTask != null)
+				_ = statTrakFlushTask.ContinueWith(t =>
+				{
+					_ = t.Exception;
+					statTrakFlushCancellation?.Dispose();
+				}, TaskScheduler.Default);
+			else
+				statTrakFlushCancellation?.Dispose();
 		}
 	}
 
@@ -359,7 +427,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	}
 
 	private bool DiscordBotEnabled =>
-		!Links.UsesDiscordUtilities && Db.Configured && HasDiscordBotToken;
+		LinkPolicy.RunBot(Links.UsesDiscordUtilities, Db.Configured, HasDiscordBotToken);
 
 	private async Task FlushStatTrakLoop(CancellationToken cancellationToken)
 	{
@@ -401,9 +469,9 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			suppressedDatabaseErrors = 0;
 			nextDatabaseErrorLog = now + 5000;
 			if (suppressed > 0)
-				Logger.LogError("Database write failed: {Error} ({Suppressed} similar errors suppressed)", exception?.Message, suppressed);
+				Logger.LogError(exception, "Database write failed ({Suppressed} similar errors suppressed)", suppressed);
 			else
-				Logger.LogError("Database write failed: {Error}", exception?.Message);
+				Logger.LogError(exception, "Database write failed");
 		}
 	}
 
@@ -458,6 +526,18 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	{
 		return !Config.Stickers.VipOnly || HasVip(steamId);
 	}
+
+    internal async Task<WeaponSkinsBot.Database.WeaponSkinsDatabase.Permissions> DiscordPermissionsAsync(
+        ulong steamId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return await Server.NextWorldUpdateAsync(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (stopping) return new WeaponSkinsBot.Database.WeaponSkinsDatabase.Permissions(false, false);
+            return new WeaponSkinsBot.Database.WeaponSkinsDatabase.Permissions(StickersAllowed(steamId), GenAllowed(steamId));
+        }).WaitAsync(cancellationToken);
+    }
 
 	private bool HasVip(ulong steamId)
 	{

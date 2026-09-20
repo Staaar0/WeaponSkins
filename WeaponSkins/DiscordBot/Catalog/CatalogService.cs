@@ -10,6 +10,9 @@ public sealed class CatalogService : IDisposable
 	private readonly string cacheDirectory;
 	private readonly string fallbackDirectory;
 
+    public IReadOnlyList<string> MenuCategories { get; private set; } = [];
+    public IReadOnlyDictionary<int, int> MenuWeaponOrder { get; private set; } = new Dictionary<int, int>();
+
     public IReadOnlyList<string> Categories { get; private set; } = [];
     public IReadOnlyDictionary<string, List<WeaponDef>> WeaponsByCategory { get; private set; } = new Dictionary<string, List<WeaponDef>>();
     public IReadOnlyDictionary<int, List<PaintDef>> Paints { get; private set; } = new Dictionary<int, List<PaintDef>>();
@@ -49,6 +52,7 @@ public sealed class CatalogService : IDisposable
 		using var stickers = await Fetch("stickers", cancellationToken);
 		using var charms = await Fetch("keychains", cancellationToken);
 
+        LoadWeaponImages();
         ParseSkins(skins.RootElement);
         ParseAgents(agents.RootElement);
         ParseMusic(music.RootElement);
@@ -96,6 +100,29 @@ public sealed class CatalogService : IDisposable
         return partial.Key == 0 ? null : new WeaponDef(partial.Key, partial.Value, Knives.Any(k => k.DefIndex == partial.Key) ? "Knives" : "Gloves");
     }
 
+    public IReadOnlyDictionary<int, string> WeaponImages { get; private set; } = new Dictionary<int, string>();
+
+    private void LoadWeaponImages()
+    {
+        var path = Path.Combine(fallbackDirectory, "base_weapons.json");
+        if (!File.Exists(path)) return;
+        using var data = JsonDocument.Parse(File.ReadAllBytes(path));
+        WeaponImages = data.RootElement.EnumerateArray()
+            .Where(x => x.TryGetProperty("def_index", out var id) && id.ValueKind == JsonValueKind.Number)
+            .GroupBy(x => x.GetProperty("def_index").GetInt32())
+            .ToDictionary(x => x.Key, x => ReadString(x.First(), "image"));
+    }
+
+    public static int RarityRank(string color) => color.ToLowerInvariant() switch
+    {
+        "#e4ae39" => 7, "#eb4b4b" => 6, "#d32ce6" => 5,
+        "#8847ff" => 4, "#4b69ff" => 3, "#5e98d9" => 2, _ => 1
+    };
+
+    private static string RarityValue(JsonElement item, string property) =>
+        item.TryGetProperty("rarity", out var rarity) && rarity.ValueKind == JsonValueKind.Object
+            ? ReadString(rarity, property) : "";
+
     public string WeaponName(int defIndex) => WeaponNames.TryGetValue(defIndex, out var name) ? name : $"#{defIndex}";
 
 	private async Task<JsonDocument> Fetch(string name, CancellationToken cancellationToken)
@@ -123,6 +150,12 @@ public sealed class CatalogService : IDisposable
 
     private void ParseSkins(JsonElement root)
     {
+        MenuCategories = root.EnumerateArray().Select(x => ReadString(x.GetProperty("category"), "name") switch {
+            "Knives" => "Knifes", "SMGs" => "SMG", "Equipment" => "Pistols", var name => name
+        }).Distinct().ToArray();
+        MenuWeaponOrder = root.EnumerateArray().Select(x => x.GetProperty("weapon").GetProperty("weapon_id").GetInt32())
+            .Distinct().Select((def, index) => (def, index)).ToDictionary(x => x.def, x => x.index);
+        var weaponImages = WeaponImages.ToDictionary();
         var paints = new Dictionary<int, List<PaintDef>>();
         var seen = new HashSet<(int, int)>();
         var weapons = new Dictionary<int, (string Name, string Category)>();
@@ -138,8 +171,11 @@ public sealed class CatalogService : IDisposable
                 continue;
 
             var defIndex = weaponId.GetInt32();
-            if (!int.TryParse(paintProp.GetString(), out var paint) || paint <= 0 || !seen.Add((defIndex, paint)))
+            var vanillaKnife = ReadString(skin, "id").StartsWith("skin-vanilla-weapon_", StringComparison.Ordinal);
+            var paint = 0;
+            if ((!vanillaKnife && (!int.TryParse(paintProp.GetString(), out paint) || paint <= 0)) || !seen.Add((defIndex, paint)))
                 continue;
+            if (vanillaKnife || !weaponImages.ContainsKey(defIndex)) weaponImages[defIndex] = ReadString(skin, "image");
 
             var weaponName = NormalizeMenuName(ReadString(weapon, "name"));
             var category = skin.TryGetProperty("category", out var categoryObj) && categoryObj.ValueKind == JsonValueKind.Object
@@ -176,7 +212,9 @@ public sealed class CatalogService : IDisposable
 
             if (!paints.TryGetValue(defIndex, out var list))
                 paints[defIndex] = list = [];
-            list.Add(new PaintDef(paint, paintName, minFloat, maxFloat, image));
+            var displayName = ReadString(skin, "name") + " [" + paint + "]";
+            list.Add(new PaintDef(paint, paintName, minFloat, maxFloat, image,
+                displayName, RarityValue(skin, "name"), RarityValue(skin, "color")));
 
             switch (category)
             {
@@ -202,8 +240,9 @@ public sealed class CatalogService : IDisposable
 
         foreach (var list in byCategory.Values)
             list.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-        foreach (var list in paints.Values)
-            list.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        foreach (var def in paints.Keys.ToArray())
+            paints[def] = paints[def].OrderByDescending(x => RarityRank(x.RarityColor)).ToList();
+        WeaponImages = weaponImages;
 
         var order = new[] { "Rifles", "Pistols", "SMGs", "Heavy", "Snipers", "Other" };
         Categories = order.Where(byCategory.ContainsKey).Concat(byCategory.Keys.Where(c => !order.Contains(c)).Order()).ToList();
@@ -244,15 +283,15 @@ public sealed class CatalogService : IDisposable
 
             var team = agent.TryGetProperty("team", out var teamObj) && teamObj.ValueKind == JsonValueKind.Object
                 ? ReadString(teamObj, "id") : "";
-            var item = new AgentDef(model, name, team == "terrorists" ? 2 : 3, faction, ReadString(agent, "image"));
+            var item = new AgentDef(model, name, team == "terrorists" ? 2 : 3, faction, ReadString(agent, "image"), ReadString(agent, "name"), RarityValue(agent, "color"));
             if (item.Team == 2)
                 t.Add(item);
             else
                 ct.Add(item);
         }
 
-        AgentsT = t.OrderBy(item => item.Name).ToList();
-        AgentsCT = ct.OrderBy(item => item.Name).ToList();
+        AgentsT = t.OrderByDescending(item => RarityRank(item.RarityColor)).ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+        AgentsCT = ct.OrderByDescending(item => RarityRank(item.RarityColor)).ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private void ParseMusic(JsonElement root)
@@ -299,7 +338,7 @@ public sealed class CatalogService : IDisposable
             var name = ReadString(item, "name");
             if (name.StartsWith("Sticker | ", StringComparison.Ordinal))
                 name = name[10..];
-            list.Add(new StickerDef(id, name));
+            list.Add(new StickerDef(id, name, ReadString(item, "image")));
         }
         Stickers = list.OrderBy(item => item.Name).ToList();
     }

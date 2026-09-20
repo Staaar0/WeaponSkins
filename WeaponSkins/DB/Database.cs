@@ -139,19 +139,20 @@ public sealed class Database
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 		""";
 
-	public async Task Bootstrap(bool linkTables, bool botLeaseTable)
+	public async Task Bootstrap(bool linkTables, bool botLeaseTable, CancellationToken cancellationToken = default)
 	{
-		await using var connection = await Open();
-		if (!await AcquireSchemaLock(connection))
-			throw new TimeoutException("Timed out waiting for the WeaponSkins schema lock");
+		await using var connection = await Open(cancellationToken);
 
 		try
 		{
-			await Resume(connection, "ws_weapons");
-			await Resume(connection, "ws_stickers");
-			await Resume(connection, "ws_charms");
-			await Resume(connection, "ws_music");
-			await Resume(connection, "ws_pins");
+			if (!await AcquireSchemaLock(connection, cancellationToken))
+				throw new TimeoutException("Timed out waiting for the WeaponSkins schema lock");
+
+			await Resume(connection, "ws_weapons", cancellationToken);
+			await Resume(connection, "ws_stickers", cancellationToken);
+			await Resume(connection, "ws_charms", cancellationToken);
+			await Resume(connection, "ws_music", cancellationToken);
+			await Resume(connection, "ws_pins", cancellationToken);
 
 			await using var command = connection.CreateCommand();
 			command.CommandTimeout = SchemaTimeout;
@@ -216,8 +217,8 @@ public sealed class Database
 
 				{(botLeaseTable ? BotLeaseTable : "")}
 				""";
-			await command.ExecuteNonQueryAsync();
-			await Migrate(connection);
+			await command.ExecuteNonQueryAsync(cancellationToken);
+			await Migrate(connection, cancellationToken);
 		}
 		finally
 		{
@@ -225,163 +226,165 @@ public sealed class Database
 		}
 	}
 
-	private static async Task<bool> AcquireSchemaLock(MySqlConnection connection)
+	private static async Task<bool> AcquireSchemaLock(MySqlConnection connection, CancellationToken cancellationToken)
 	{
 		await using var command = connection.CreateCommand();
 		command.CommandTimeout = SchemaTimeout + 5;
 		command.CommandText = "SELECT GET_LOCK('WeaponSkins.schema', @timeout);";
 		command.Parameters.AddWithValue("@timeout", SchemaTimeout);
-		return Convert.ToInt32(await command.ExecuteScalarAsync() ?? 0) == 1;
+		return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken) ?? 0) == 1;
 	}
 
 	private static async Task ReleaseSchemaLock(MySqlConnection connection)
 	{
 		try
 		{
+			using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+			var cancellationToken = cancellation.Token;
 			await using var command = connection.CreateCommand();
 			command.CommandTimeout = 5;
 			command.CommandText = "SELECT RELEASE_LOCK('WeaponSkins.schema');";
-			await command.ExecuteScalarAsync();
+			await command.ExecuteScalarAsync(cancellationToken);
 		}
 		catch
 		{
 		}
 	}
 
-	private static async Task Migrate(MySqlConnection connection)
+	private static async Task Migrate(MySqlConnection connection, CancellationToken cancellationToken)
 	{
-		await AddColumn(connection, "ws_permissions", "gen", "TINYINT NOT NULL DEFAULT 0 AFTER stickers");
+		await AddColumn(connection, "ws_permissions", "gen", "TINYINT NOT NULL DEFAULT 0 AFTER stickers", cancellationToken);
 
-		await AddColumn(connection, "ws_stickers", "paint", "INT NOT NULL DEFAULT 0 AFTER defindex");
-		if (!await HasPrimaryKeyColumn(connection, "ws_stickers", "paint"))
+		await AddColumn(connection, "ws_stickers", "paint", "INT NOT NULL DEFAULT 0 AFTER defindex", cancellationToken);
+		if (!await HasPrimaryKeyColumn(connection, "ws_stickers", "paint", cancellationToken))
 			await Execute(connection, """
 				UPDATE ws_stickers s
 				JOIN ws_weapons w ON w.steamid = s.steamid AND w.team = s.team AND w.defindex = s.defindex
 				SET s.paint = w.paint;
-				""");
+				""", cancellationToken);
 
-		await AddColumn(connection, "ws_charms", "paint", "INT NOT NULL DEFAULT 0 AFTER defindex");
-		if (!await HasPrimaryKeyColumn(connection, "ws_charms", "paint"))
+		await AddColumn(connection, "ws_charms", "paint", "INT NOT NULL DEFAULT 0 AFTER defindex", cancellationToken);
+		if (!await HasPrimaryKeyColumn(connection, "ws_charms", "paint", cancellationToken))
 			await Execute(connection, """
 				UPDATE ws_charms c
 				JOIN ws_weapons w ON w.steamid = c.steamid AND w.team = c.team AND w.defindex = c.defindex
 				SET c.paint = w.paint;
-				""");
+				""", cancellationToken);
 
-		await RebuildTable(connection, "ws_stickers", StickersBody, StickersColumns);
-		await RebuildTable(connection, "ws_charms", CharmsBody, CharmsColumns);
-		await RebuildTable(connection, "ws_weapons", WeaponsBody, WeaponsColumns);
+		await RebuildTable(connection, "ws_stickers", StickersBody, StickersColumns, cancellationToken);
+		await RebuildTable(connection, "ws_charms", CharmsBody, CharmsColumns, cancellationToken);
+		await RebuildTable(connection, "ws_weapons", WeaponsBody, WeaponsColumns, cancellationToken);
 
-		if (await HasColumn(connection, "ws_gloves", "wear"))
+		if (await HasColumn(connection, "ws_gloves", "wear", cancellationToken))
 		{
 			await Execute(connection, """
 				INSERT IGNORE INTO ws_weapons (steamid, team, defindex, paint, wear, seed)
 				SELECT steamid, team, defindex, paint, wear, seed FROM ws_gloves WHERE defindex > 0;
-				""");
-			await Execute(connection, "ALTER TABLE ws_gloves DROP COLUMN wear;");
-			await Execute(connection, "ALTER TABLE ws_gloves DROP COLUMN seed;");
+				""", cancellationToken);
+			await Execute(connection, "ALTER TABLE ws_gloves DROP COLUMN wear;", cancellationToken);
+			await Execute(connection, "ALTER TABLE ws_gloves DROP COLUMN seed;", cancellationToken);
 		}
 
 		await Execute(connection, """
 			INSERT IGNORE INTO ws_equipped (steamid, team, defindex, paint)
 			SELECT steamid, team, defindex, paint FROM ws_weapons;
-			""");
+			""", cancellationToken);
 
-		await Collapse(connection, "ws_music", MusicBody, "kit");
-		await Collapse(connection, "ws_pins", PinsBody, "pin");
+		await Collapse(connection, "ws_music", MusicBody, "kit", cancellationToken);
+		await Collapse(connection, "ws_pins", PinsBody, "pin", cancellationToken);
 	}
 
-	private static async Task Collapse(MySqlConnection connection, string table, string body, string column)
+	private static async Task Collapse(MySqlConnection connection, string table, string body, string column, CancellationToken cancellationToken)
 	{
-		if (!await HasColumn(connection, table, "team"))
+		if (!await HasColumn(connection, table, "team", cancellationToken))
 		{
-			await Execute(connection, $"DROP TABLE IF EXISTS {table}_old;");
+			await Execute(connection, $"DROP TABLE IF EXISTS {table}_old;", cancellationToken);
 			return;
 		}
 
-		await Swap(connection, table, body, $"INSERT INTO {table}_new (steamid, {column}) SELECT steamid, MAX({column}) FROM {table} WHERE {column} > 0 GROUP BY steamid;");
+		await Swap(connection, table, body, $"INSERT INTO {table}_new (steamid, {column}) SELECT steamid, MAX({column}) FROM {table} WHERE {column} > 0 GROUP BY steamid;", cancellationToken);
 	}
 
-	private static async Task Swap(MySqlConnection connection, string table, string body, string copy)
+	private static async Task Swap(MySqlConnection connection, string table, string body, string copy, CancellationToken cancellationToken)
 	{
-		await Execute(connection, $"DROP TABLE IF EXISTS {table}_new;");
-		await Execute(connection, $"DROP TABLE IF EXISTS {table}_old;");
-		await Execute(connection, $"CREATE TABLE {table}_new ({body}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-		await Execute(connection, copy);
-		await Execute(connection, $"RENAME TABLE {table} TO {table}_old, {table}_new TO {table};");
-		await Execute(connection, $"DROP TABLE {table}_old;");
+		await Execute(connection, $"DROP TABLE IF EXISTS {table}_new;", cancellationToken);
+		await Execute(connection, $"DROP TABLE IF EXISTS {table}_old;", cancellationToken);
+		await Execute(connection, $"CREATE TABLE {table}_new ({body}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;", cancellationToken);
+		await Execute(connection, copy, cancellationToken);
+		await Execute(connection, $"RENAME TABLE {table} TO {table}_old, {table}_new TO {table};", cancellationToken);
+		await Execute(connection, $"DROP TABLE {table}_old;", cancellationToken);
 	}
 
-	private static async Task Resume(MySqlConnection connection, string table)
+	private static async Task Resume(MySqlConnection connection, string table, CancellationToken cancellationToken)
 	{
-		if (await Exists(connection, table))
+		if (await Exists(connection, table, cancellationToken))
 			return;
 
-		if (await Exists(connection, $"{table}_new"))
-			await Execute(connection, $"RENAME TABLE {table}_new TO {table};");
-		else if (await Exists(connection, $"{table}_old"))
-			await Execute(connection, $"RENAME TABLE {table}_old TO {table};");
+		if (await Exists(connection, $"{table}_new", cancellationToken))
+			await Execute(connection, $"RENAME TABLE {table}_new TO {table};", cancellationToken);
+		else if (await Exists(connection, $"{table}_old", cancellationToken))
+			await Execute(connection, $"RENAME TABLE {table}_old TO {table};", cancellationToken);
 	}
 
-	private static async Task AddColumn(MySqlConnection connection, string table, string column, string definition)
+	private static async Task AddColumn(MySqlConnection connection, string table, string column, string definition, CancellationToken cancellationToken)
 	{
-		if (await HasColumn(connection, table, column))
+		if (await HasColumn(connection, table, column, cancellationToken))
 			return;
 
-		await Execute(connection, $"ALTER TABLE {table} ADD COLUMN {column} {definition};");
+		await Execute(connection, $"ALTER TABLE {table} ADD COLUMN {column} {definition};", cancellationToken);
 	}
 
-	private static async Task<bool> HasColumn(MySqlConnection connection, string table, string column)
+	private static async Task<bool> HasColumn(MySqlConnection connection, string table, string column, CancellationToken cancellationToken)
 	{
 		return await Scalar(connection, """
 			SELECT COUNT(*) FROM information_schema.COLUMNS
 			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @table AND COLUMN_NAME = @column;
-			""", table, column) > 0;
+			""", table, column, cancellationToken) > 0;
 	}
 
-	private static async Task<bool> HasPrimaryKeyColumn(MySqlConnection connection, string table, string column)
+	private static async Task<bool> HasPrimaryKeyColumn(MySqlConnection connection, string table, string column, CancellationToken cancellationToken)
 	{
 		return await Scalar(connection, """
 			SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE
 			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @table
 				AND CONSTRAINT_NAME = 'PRIMARY' AND COLUMN_NAME = @column;
-			""", table, column) > 0;
+			""", table, column, cancellationToken) > 0;
 	}
 
-	private static async Task RebuildTable(MySqlConnection connection, string table, string body, string columns)
+	private static async Task RebuildTable(MySqlConnection connection, string table, string body, string columns, CancellationToken cancellationToken)
 	{
-		if (await HasPrimaryKeyColumn(connection, table, "paint"))
+		if (await HasPrimaryKeyColumn(connection, table, "paint", cancellationToken))
 		{
-			await Execute(connection, $"DROP TABLE IF EXISTS {table}_old;");
+			await Execute(connection, $"DROP TABLE IF EXISTS {table}_old;", cancellationToken);
 			return;
 		}
 
-		await Swap(connection, table, body, $"INSERT INTO {table}_new ({columns}) SELECT {columns} FROM {table};");
+		await Swap(connection, table, body, $"INSERT INTO {table}_new ({columns}) SELECT {columns} FROM {table};", cancellationToken);
 	}
 
-	private static async Task<bool> Exists(MySqlConnection connection, string table)
+	private static async Task<bool> Exists(MySqlConnection connection, string table, CancellationToken cancellationToken)
 	{
 		return await Scalar(connection, """
 			SELECT COUNT(*) FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @table;
-			""", table, "") > 0;
+			""", table, "", cancellationToken) > 0;
 	}
 
-	private static async Task<long> Scalar(MySqlConnection connection, string sql, string table, string column)
+	private static async Task<long> Scalar(MySqlConnection connection, string sql, string table, string column, CancellationToken cancellationToken)
 	{
 		await using var command = connection.CreateCommand();
 		command.CommandTimeout = SchemaTimeout;
 		command.CommandText = sql;
 		command.Parameters.AddWithValue("@table", table);
 		command.Parameters.AddWithValue("@column", column);
-		return Convert.ToInt64(await command.ExecuteScalarAsync() ?? 0L);
+		return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 	}
 
-	private static async Task Execute(MySqlConnection connection, string sql)
+	private static async Task Execute(MySqlConnection connection, string sql, CancellationToken cancellationToken)
 	{
 		await using var command = connection.CreateCommand();
 		command.CommandTimeout = SchemaTimeout;
 		command.CommandText = sql;
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(cancellationToken);
 	}
 }

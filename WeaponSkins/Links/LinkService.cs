@@ -30,18 +30,19 @@ public sealed class LinkService
 	private readonly Dictionary<ulong, long> nextCode = [];
 	private CancellationTokenSource? cancellation;
 	private Task? loop;
+	private readonly SemaphoreSlim syncWake = new(0, 1);
 
 	public bool UsesDiscordUtilities { get; }
 	public bool Required { get; }
-	public bool CanIssueCodes => !UsesDiscordUtilities &&
-		(Required || plugin.Db.Configured && plugin.HasDiscordBotToken);
+	public bool CanIssueCodes => LinkPolicy.CanIssueCodes(UsesDiscordUtilities,
+		Required, plugin.Db.Configured, plugin.HasDiscordBotToken);
 
 	public LinkService(WeaponSkins plugin, LinkStore store)
 	{
 		this.plugin = plugin;
 		this.store = store;
 		UsesDiscordUtilities = string.Equals(plugin.Config.LinkingMethod, "Discord-Utilities", StringComparison.OrdinalIgnoreCase);
-		Required = UsesDiscordUtilities || plugin.Config.LinkRequired && plugin.Db.Configured;
+		Required = LinkPolicy.RequiresLink(UsesDiscordUtilities, plugin.Config.LinkRequired, plugin.Db.Configured);
 		if (UsesDiscordUtilities)
 			discordUtilities = new DiscordUtilitiesLinkProvider(plugin.Logger);
 	}
@@ -281,15 +282,35 @@ public sealed class LinkService
 		plugin.Reply(player, "link_success");
 	}
 
+    /// <summary>Called after a bot transaction commits. No game natives or new polling task.</summary>
+    public void WakeSync(ulong steamId)
+    {
+        lock (sync)
+        {
+            if (!online.Contains(steamId) || UsesDiscordUtilities) return;
+            try { syncWake.Release(); } catch (SemaphoreFullException) { }
+        }
+    }
+
 	private async Task Poll(CancellationToken cancellationToken)
 	{
 		var tick = 0L;
+        var nextTick = Environment.TickCount64 + TickMs;
 		while (!cancellationToken.IsCancellationRequested)
 		{
 			try
 			{
-				await Task.Delay(TickMs, cancellationToken);
-				tick++;
+				var woke = await syncWake.WaitAsync((int)Math.Clamp(nextTick - Environment.TickCount64, 0, TickMs), cancellationToken);
+                if (woke)
+                {
+                    // Merge short bursts of successful Discord saves into the same existing queue drain.
+                    await Task.Delay(75, cancellationToken);
+                    while (syncWake.Wait(0)) { }
+                    await Drain(cancellationToken);
+                }
+                if (Environment.TickCount64 < nextTick) continue;
+                nextTick = Environment.TickCount64 + TickMs;
+                tick++;
 
 				if (UsesDiscordUtilities)
 				{
@@ -299,7 +320,7 @@ public sealed class LinkService
 				if (CanIssueCodes)
 					await Detect(tick % SweepEveryTicks == 0 ? Unlinked() : Pending(), cancellationToken);
 
-				if (tick % SyncEveryTicks == 0)
+				if (!woke && tick % SyncEveryTicks == 0)
 					await Drain(cancellationToken);
 
 				if (tick % MaintenanceEveryTicks == 0)

@@ -93,13 +93,13 @@ Command names can be changed in the config, except `!link`.
 | `/link CODE` | Links your Steam account with the code `!link` gave you in game |
 | `/unlink` | Removes the link |
 | `/me` | Shows which Steam account you are linked to |
-| `/skins` | Weapon skins, then pattern, wear, StatTrak and stickers |
-| `/knife` | Knife and its skin |
+| `/skins` | Choose a team, category, weapon and skin |
+| `/knife` | Choose a team, knife and skin |
 | `/gloves` | Gloves and their skin |
 | `/agents` | Agent model |
 | `/music` | Music kit |
 | `/pins` | Profile pin |
-| `/stickers` | Stickers, slots 1-4 or all of them |
+| `/stickers` | Select slots 1–4, search stickers, remove selected slots, or remove all stickers |
 | `/wear` `/seed` `/nametag` `/stattrak` | Change one thing on a weapon you already skinned |
 | `/gen CODE` | Apply a full craft from an inspect code |
 | `/loadout` | Everything you have equipped |

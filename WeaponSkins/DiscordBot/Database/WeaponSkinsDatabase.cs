@@ -1,3 +1,5 @@
+using SharedEconSticker = global::WeaponSkins.EconSticker;
+using SharedEconPreview = global::WeaponSkins.EconItemPreview;
 using System.Security.Cryptography;
 using System.Text;
 using MySqlConnector;
@@ -11,12 +13,26 @@ public sealed class WeaponSkinsDatabase
 	private const int ColumnMissing = 1054;
 	private readonly global::WeaponSkins.Database database;
 
-	public WeaponSkinsDatabase(global::WeaponSkins.Database database)
+	private readonly CancellationToken cancellationToken;
+    private readonly Action<ulong>? loadoutChanged;
+    private readonly Func<ulong, CancellationToken, Task<Permissions>>? livePermissions;
+
+	public WeaponSkinsDatabase(global::WeaponSkins.Database database, Action<ulong>? loadoutChanged = null,
+        CancellationToken cancellationToken = default, Func<ulong, CancellationToken, Task<Permissions>>? livePermissions = null)
 	{
 		this.database = database;
+        this.loadoutChanged = loadoutChanged;
+        this.cancellationToken = cancellationToken;
+        this.livePermissions = livePermissions;
 	}
 
-    private async Task<MySqlConnection> OpenAsync(CancellationToken cancellationToken = default)
+    private void NotifyLoadoutChanged(ulong steamId)
+    {
+        // Notification failure must never turn an already-committed save into a reported SQL failure.
+        try { loadoutChanged?.Invoke(steamId); } catch { /* The durable sync row is polled as a fallback. */ }
+    }
+
+    private async Task<MySqlConnection> OpenAsync()
     {
 		return await database.Open(cancellationToken);
 	}
@@ -29,7 +45,7 @@ public sealed class WeaponSkinsDatabase
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
@@ -39,7 +55,7 @@ public sealed class WeaponSkinsDatabase
                 find.Transaction = transaction;
                 find.CommandText = "SELECT steamid FROM ws_link_codes WHERE code_hash = @hash AND expires_at > NOW() LIMIT 1 FOR UPDATE;";
                 find.Parameters.AddWithValue("@hash", hash);
-                var value = await find.ExecuteScalarAsync();
+                var value = await find.ExecuteScalarAsync(cancellationToken);
                 if (value == null)
                 {
                     await transaction.RollbackAsync();
@@ -55,8 +71,8 @@ public sealed class WeaponSkinsDatabase
                 existing.CommandText = "SELECT steamid, discord_id FROM ws_links WHERE steamid = @sid OR discord_id = @did FOR UPDATE;";
                 existing.Parameters.AddWithValue("@sid", steamId);
                 existing.Parameters.AddWithValue("@did", discordId);
-                await using var reader = await existing.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                await using var reader = await existing.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                     links.Add((reader.GetUInt64(0), reader.GetUInt64(1)));
             }
 
@@ -65,7 +81,7 @@ public sealed class WeaponSkinsDatabase
                 if (link.SteamId == steamId && link.DiscordId == discordId)
                 {
                     await DeleteCode(connection, transaction, steamId);
-                    await transaction.CommitAsync();
+                    await transaction.CommitAsync(cancellationToken);
                     return (true, "Your Steam account is already linked.", steamId);
                 }
                 if (link.DiscordId == discordId)
@@ -86,11 +102,11 @@ public sealed class WeaponSkinsDatabase
                 insert.CommandText = "INSERT INTO ws_links (steamid, discord_id) VALUES (@sid, @did);";
                 insert.Parameters.AddWithValue("@sid", steamId);
                 insert.Parameters.AddWithValue("@did", discordId);
-                await insert.ExecuteNonQueryAsync();
+                await insert.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await DeleteCode(connection, transaction, steamId);
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(cancellationToken);
             return (true, "Steam account linked successfully.", steamId);
         }
         catch
@@ -106,7 +122,7 @@ public sealed class WeaponSkinsDatabase
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM ws_links WHERE discord_id = @did;";
         command.Parameters.AddWithValue("@did", discordId);
-        return await command.ExecuteNonQueryAsync() > 0;
+        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
     public async Task<ulong?> GetSteamIdAsync(ulong discordId)
@@ -115,14 +131,43 @@ public sealed class WeaponSkinsDatabase
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT steamid FROM ws_links WHERE discord_id = @did LIMIT 1;";
         command.Parameters.AddWithValue("@did", discordId);
-        var value = await command.ExecuteScalarAsync();
+        var value = await command.ExecuteScalarAsync(cancellationToken);
         return value == null ? null : Convert.ToUInt64(value);
+    }
+
+    internal async Task<OwnedWeapons> GetOwnedWeaponsAsync(ulong discordId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = connection.CreateCommand();
+        // One indexed lookup of this account's equipped items, without the other loadout tables.
+        // The left join also returns linked accounts that have no custom weapons.
+        command.CommandText = """
+            SELECT l.steamid, e.defindex
+            FROM ws_links l
+            LEFT JOIN ws_equipped e ON e.steamid = l.steamid AND e.paint > 0
+            WHERE l.discord_id = @did
+            UNION
+            SELECT l.steamid, g.defindex
+            FROM ws_links l
+            JOIN ws_gloves g ON g.steamid = l.steamid AND g.paint > 0
+            WHERE l.discord_id = @did;
+            """;
+        command.Parameters.AddWithValue("@did", discordId);
+        ulong steamId = 0;
+        var defs = new HashSet<int>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            steamId = reader.GetUInt64(0);
+            if (!reader.IsDBNull(1)) defs.Add(reader.GetInt32(1));
+        }
+        return new OwnedWeapons(steamId, defs.ToArray());
     }
 
     public async Task SetSkinAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint, bool knife)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
         {
             foreach (var team in target.Teams())
@@ -136,7 +181,8 @@ public sealed class WeaponSkinsDatabase
                 await WriteEquipped(connection, transaction, steamId, team, defIndex, paintId);
             }
             await QueueSync(connection, transaction, steamId);
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(cancellationToken);
+            NotifyLoadoutChanged(steamId);
         }
         catch
         {
@@ -160,7 +206,8 @@ public sealed class WeaponSkinsDatabase
         float? wear,
         bool statTrak,
         IReadOnlyDictionary<int, int>? stickers,
-        bool clearStickers = false)
+        bool clearStickers = false,
+        string? nameTag = null)
     {
         var paintId = paint?.Paint ?? 0;
         var floor = kind == ItemKind.Knife ? 0.01f : 0.000001f;
@@ -171,7 +218,7 @@ public sealed class WeaponSkinsDatabase
         var pattern = Math.Clamp(seed, 0, 1000);
 
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
         {
             foreach (var team in target.Teams())
@@ -185,10 +232,11 @@ public sealed class WeaponSkinsDatabase
                     glove.Transaction = transaction;
                     glove.CommandText = "INSERT INTO ws_gloves (steamid, team, defindex, paint) VALUES (@sid, @team, @def, @paint) ON DUPLICATE KEY UPDATE defindex = @def, paint = @paint;";
                     AddWeaponKey(glove, steamId, team, defIndex, paintId);
-                    await glove.ExecuteNonQueryAsync();
+                    await glove.ExecuteNonQueryAsync(cancellationToken);
                 }
 
-                await WriteBuiltWeapon(connection, transaction, steamId, team, defIndex, paintId, finalWear, pattern, statTrak);
+                await WriteBuiltWeapon(connection, transaction, steamId, team, defIndex, paintId, finalWear, pattern,
+                    statTrak, kind == ItemKind.Glove ? null : nameTag);
 
                 if (kind != ItemKind.Glove)
                     await WriteEquipped(connection, transaction, steamId, team, defIndex, paintId);
@@ -201,7 +249,8 @@ public sealed class WeaponSkinsDatabase
             }
 
             await QueueSync(connection, transaction, steamId);
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(cancellationToken);
+            NotifyLoadoutChanged(steamId);
         }
         catch
         {
@@ -210,19 +259,21 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    private static async Task WriteBuiltWeapon(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, float wear, int seed, bool statTrak)
+    private async Task WriteBuiltWeapon(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, float wear, int seed, bool statTrak, string? nameTag)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        // The name tag is left alone, and an existing StatTrak count is kept
-        // instead of being reset to zero.
+        // A null tag preserves the existing name; an empty tag explicitly clears it.
+        // Enabling StatTrak keeps an existing count instead of resetting it.
         command.CommandText = statTrak
-            ? "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, @seed, NULL, 0) ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, stattrak = CASE WHEN stattrak < 0 THEN 0 ELSE stattrak END;"
-            : "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, @seed, NULL, -1) ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, stattrak = -1;";
+            ? "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, @seed, @tag, 0) ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, nametag = IF(@set_tag, @tag, nametag), stattrak = CASE WHEN stattrak < 0 THEN 0 ELSE stattrak END;"
+            : "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, @seed, @tag, -1) ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, nametag = IF(@set_tag, @tag, nametag), stattrak = -1;";
         AddWeaponKey(command, steamId, team, defIndex, paint);
         command.Parameters.AddWithValue("@wear", wear);
         command.Parameters.AddWithValue("@seed", seed);
-        await command.ExecuteNonQueryAsync();
+        command.Parameters.AddWithValue("@set_tag", nameTag != null);
+        command.Parameters.AddWithValue("@tag", string.IsNullOrEmpty(nameTag) ? DBNull.Value : nameTag[..Math.Min(64, nameTag.Length)]);
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>
@@ -230,24 +281,24 @@ public sealed class WeaponSkinsDatabase
     /// This is the only place the bot touches slots a gen code filled, a normal
     /// sticker change leaves them alone and lets the plugin sort them out.
     /// </summary>
-    private static async Task ClearStickersAndCharm(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
+    private async Task ClearStickersAndCharm(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
     {
         await using (var stickers = connection.CreateCommand())
         {
             stickers.Transaction = transaction;
             stickers.CommandText = "DELETE FROM ws_stickers WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(stickers, steamId, team, defIndex, paint);
-            await stickers.ExecuteNonQueryAsync();
+            await stickers.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using var charm = connection.CreateCommand();
         charm.Transaction = transaction;
         charm.CommandText = "DELETE FROM ws_charms WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
         AddWeaponKey(charm, steamId, team, defIndex, paint);
-        await charm.ExecuteNonQueryAsync();
+        await charm.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task WriteChosenStickers(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, IReadOnlyDictionary<int, int> stickers)
+    private async Task WriteChosenStickers(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, IReadOnlyDictionary<int, int> stickers)
     {
         foreach (var (slot, id) in stickers)
         {
@@ -264,24 +315,25 @@ public sealed class WeaponSkinsDatabase
             }
             AddWeaponKey(command, steamId, team, defIndex, paint);
             command.Parameters.AddWithValue("@slot", slot);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
     public async Task ResetKnifeAsync(ulong steamId, TeamTarget target)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         foreach (var team in target.Teams())
             await WriteKnife(connection, transaction, steamId, team, 0);
         await QueueSync(connection, transaction, steamId);
-        await transaction.CommitAsync();
+        await transaction.CommitAsync(cancellationToken);
+        NotifyLoadoutChanged(steamId);
     }
 
     public async Task SetGlovesAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
         {
             foreach (var team in target.Teams())
@@ -293,7 +345,7 @@ public sealed class WeaponSkinsDatabase
                     remove.CommandText = "DELETE FROM ws_gloves WHERE steamid = @sid AND team = @team;";
                     remove.Parameters.AddWithValue("@sid", steamId);
                     remove.Parameters.AddWithValue("@team", team);
-                    await remove.ExecuteNonQueryAsync();
+                    await remove.ExecuteNonQueryAsync(cancellationToken);
                     continue;
                 }
 
@@ -305,12 +357,13 @@ public sealed class WeaponSkinsDatabase
                     glove.Parameters.AddWithValue("@team", team);
                     glove.Parameters.AddWithValue("@def", defIndex);
                     glove.Parameters.AddWithValue("@paint", paint.Paint);
-                    await glove.ExecuteNonQueryAsync();
+                    await glove.ExecuteNonQueryAsync(cancellationToken);
                 }
                 await EnsureWeapon(connection, transaction, steamId, team, defIndex, paint.Paint, Math.Max(paint.MinFloat, 0.000001f));
             }
             await QueueSync(connection, transaction, steamId);
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(cancellationToken);
+            NotifyLoadoutChanged(steamId);
         }
         catch
         {
@@ -322,7 +375,7 @@ public sealed class WeaponSkinsDatabase
     public async Task SetAgentAsync(ulong steamId, int team, AgentDef? agent)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         if (agent == null)
         {
             await using var remove = connection.CreateCommand();
@@ -330,7 +383,7 @@ public sealed class WeaponSkinsDatabase
             remove.CommandText = "DELETE FROM ws_agents WHERE steamid = @sid AND team = @team;";
             remove.Parameters.AddWithValue("@sid", steamId);
             remove.Parameters.AddWithValue("@team", team);
-            await remove.ExecuteNonQueryAsync();
+            await remove.ExecuteNonQueryAsync(cancellationToken);
         }
         else
         {
@@ -340,16 +393,17 @@ public sealed class WeaponSkinsDatabase
             command.Parameters.AddWithValue("@sid", steamId);
             command.Parameters.AddWithValue("@team", team);
             command.Parameters.AddWithValue("@model", agent.Model);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         await QueueSync(connection, transaction, steamId);
-        await transaction.CommitAsync();
+        await transaction.CommitAsync(cancellationToken);
+        NotifyLoadoutChanged(steamId);
     }
 
     public async Task SetMusicAsync(ulong steamId, int kit)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
@@ -359,16 +413,17 @@ public sealed class WeaponSkinsDatabase
             command.Parameters.AddWithValue("@sid", steamId);
             if (kit > 0)
                 command.Parameters.AddWithValue("@value", kit);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         await QueueSync(connection, transaction, steamId);
-        await transaction.CommitAsync();
+        await transaction.CommitAsync(cancellationToken);
+        NotifyLoadoutChanged(steamId);
     }
 
     public async Task SetPinAsync(ulong steamId, int pin)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
@@ -378,10 +433,11 @@ public sealed class WeaponSkinsDatabase
             command.Parameters.AddWithValue("@sid", steamId);
             if (pin > 0)
                 command.Parameters.AddWithValue("@value", pin);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         await QueueSync(connection, transaction, steamId);
-        await transaction.CommitAsync();
+        await transaction.CommitAsync(cancellationToken);
+        NotifyLoadoutChanged(steamId);
     }
 
     public async Task<bool> SetWearAsync(ulong steamId, TeamTarget target, int defIndex, float wear, CatalogService catalog)
@@ -389,9 +445,8 @@ public sealed class WeaponSkinsDatabase
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
             var def = catalog.FindPaint(defIndex, paint);
-            var minimum = def == null ? 0.000001f : Math.Max(def.MinFloat, 0.000001f);
-            if (defIndex is 42 or 59 || defIndex >= 500)
-                minimum = Math.Max(minimum, 0.01f);
+            var knife = defIndex is 42 or 59 || catalog.Knives.Any(x => x.DefIndex == defIndex);
+            var minimum = def == null ? (knife ? 0.01f : 0.000001f) : MinimumWear(defIndex, def, knife);
             var maximum = def?.MaxFloat ?? 1f;
             var value = Math.Clamp(wear, minimum, maximum);
             await using var command = connection.CreateCommand();
@@ -399,7 +454,7 @@ public sealed class WeaponSkinsDatabase
             command.CommandText = "UPDATE ws_weapons SET wear = @value WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(command, steamId, team, defIndex, paint);
             command.Parameters.AddWithValue("@value", value);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         });
     }
 
@@ -412,7 +467,7 @@ public sealed class WeaponSkinsDatabase
             command.CommandText = "UPDATE ws_weapons SET seed = @value WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(command, steamId, team, defIndex, paint);
             command.Parameters.AddWithValue("@value", seed);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         });
     }
 
@@ -425,7 +480,7 @@ public sealed class WeaponSkinsDatabase
             command.CommandText = "UPDATE ws_weapons SET nametag = @value WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(command, steamId, team, defIndex, paint);
             command.Parameters.AddWithValue("@value", (object?)tag ?? DBNull.Value);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         });
     }
 
@@ -439,7 +494,7 @@ public sealed class WeaponSkinsDatabase
                 ? "UPDATE ws_weapons SET stattrak = CASE WHEN stattrak < 0 THEN 0 ELSE stattrak END WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;"
                 : "UPDATE ws_weapons SET stattrak = -1 WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(command, steamId, team, defIndex, paint);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         });
     }
 
@@ -478,21 +533,21 @@ public sealed class WeaponSkinsDatabase
                 }
                 AddWeaponKey(command, steamId, team, defIndex, paint);
                 command.Parameters.AddWithValue("@slot", slot);
-                await command.ExecuteNonQueryAsync();
+                await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await DropUnmanagedStickers(connection, transaction, steamId, team, defIndex, paint);
         });
     }
 
-    private static async Task DropUnmanagedStickers(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
+    private async Task DropUnmanagedStickers(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "DELETE FROM ws_stickers WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint AND slot >= @managed;";
         AddWeaponKey(command, steamId, team, defIndex, paint);
         command.Parameters.AddWithValue("@managed", ManagedStickerSlots);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public sealed class LoadoutSummary
@@ -544,13 +599,13 @@ public sealed class WeaponSkinsDatabase
             await ClearStickersAndCharm(connection, transaction, steamId, team, defIndex, paint));
     }
 
-    private static async Task Read(MySqlConnection connection, string sql, ulong steamId, Action<MySqlDataReader> row)
+    private async Task Read(MySqlConnection connection, string sql, ulong steamId, Action<MySqlDataReader> row)
     {
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("@sid", steamId);
-        await using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
             row(reader);
     }
 
@@ -558,13 +613,15 @@ public sealed class WeaponSkinsDatabase
     public readonly record struct Permissions(bool Stickers, bool Gen);
 
     /// <summary>
-    /// Asks the plugin what this player may do, so `vip_only` in WeaponSkins.json
-    /// applies here as well. The VIP flag lives in the game server's admin files,
-    /// which the bot cannot read, so the plugin writes its own answer into
-    /// ws_permissions on every join.
+    /// The built-in bot checks the plugin's live permissions on the game thread.
+    /// Database snapshots remain a fallback for callers without a live provider.
     /// </summary>
     public async Task<Permissions> PermissionsAsync(ulong steamId)
     {
+        // Do not cache VIP decisions or fall back to stale grants if the live check fails.
+        if (livePermissions != null)
+            return await livePermissions(steamId, cancellationToken);
+
         try
         {
             await using var connection = await OpenAsync();
@@ -572,8 +629,8 @@ public sealed class WeaponSkinsDatabase
             command.CommandText = "SELECT stickers, gen FROM ws_permissions WHERE steamid = @sid LIMIT 1;";
             command.Parameters.AddWithValue("@sid", steamId);
 
-            await using var reader = await command.ExecuteReaderAsync();
-            if (!await reader.ReadAsync())
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
                 return new Permissions(false, false);
 
             return new Permissions(reader.GetInt32(0) != 0, reader.GetInt32(1) != 0);
@@ -585,7 +642,7 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    public async Task<string> ApplyGenAsync(ulong steamId, TeamTarget target, EconItemPreview item, CatalogService catalog, bool allowStickers = true)
+    public async Task<string> ApplyGenAsync(ulong steamId, TeamTarget target, SharedEconPreview item, CatalogService catalog, bool allowStickers = true)
     {
         var isKnife = catalog.Knives.Any(value => value.DefIndex == item.DefIndex);
         var isGlove = catalog.Gloves.Any(value => value.DefIndex == item.DefIndex);
@@ -604,7 +661,7 @@ public sealed class WeaponSkinsDatabase
             wear = Math.Clamp(wear, minimum, 1f);
 
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
         {
             foreach (var team in target.Teams())
@@ -618,7 +675,7 @@ public sealed class WeaponSkinsDatabase
                     glove.Transaction = transaction;
                     glove.CommandText = "INSERT INTO ws_gloves (steamid, team, defindex, paint) VALUES (@sid, @team, @def, @paint) ON DUPLICATE KEY UPDATE defindex = @def, paint = @paint;";
                     AddWeaponKey(glove, steamId, team, item.DefIndex, item.PaintIndex);
-                    await glove.ExecuteNonQueryAsync();
+                    await glove.ExecuteNonQueryAsync(cancellationToken);
                 }
 
                 await WriteGeneratedWeapon(connection, transaction, steamId, team, item, wear);
@@ -646,7 +703,8 @@ public sealed class WeaponSkinsDatabase
             }
 
             await QueueSync(connection, transaction, steamId);
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(cancellationToken);
+            NotifyLoadoutChanged(steamId);
             return paintDef?.Name ?? catalog.WeaponName(item.DefIndex);
         }
         catch
@@ -659,7 +717,7 @@ public sealed class WeaponSkinsDatabase
     private async Task<bool> UpdateActiveWeapons(ulong steamId, TeamTarget target, int defIndex, Func<MySqlConnection, MySqlTransaction, int, int, Task> action)
     {
         await using var connection = await OpenAsync();
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var changed = false;
         try
         {
@@ -673,7 +731,8 @@ public sealed class WeaponSkinsDatabase
             }
             if (changed)
                 await QueueSync(connection, transaction, steamId);
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(cancellationToken);
+            if (changed) NotifyLoadoutChanged(steamId);
             return changed;
         }
         catch
@@ -683,7 +742,7 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    private static async Task<int?> ActivePaint(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex)
+    private async Task<int?> ActivePaint(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -691,7 +750,7 @@ public sealed class WeaponSkinsDatabase
         command.Parameters.AddWithValue("@sid", steamId);
         command.Parameters.AddWithValue("@team", team);
         command.Parameters.AddWithValue("@def", defIndex);
-        var value = await command.ExecuteScalarAsync();
+        var value = await command.ExecuteScalarAsync(cancellationToken);
         if (value != null)
             return Convert.ToInt32(value);
 
@@ -701,30 +760,30 @@ public sealed class WeaponSkinsDatabase
         glove.Parameters.AddWithValue("@sid", steamId);
         glove.Parameters.AddWithValue("@team", team);
         glove.Parameters.AddWithValue("@def", defIndex);
-        value = await glove.ExecuteScalarAsync();
+        value = await glove.ExecuteScalarAsync(cancellationToken);
         return value == null ? null : Convert.ToInt32(value);
     }
 
-    private static async Task EnsureWeapon(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, float minimumWear)
+    private async Task EnsureWeapon(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, float minimumWear)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, 0, NULL, -1) ON DUPLICATE KEY UPDATE wear = GREATEST(wear, @wear);";
         AddWeaponKey(command, steamId, team, defIndex, paint);
         command.Parameters.AddWithValue("@wear", minimumWear);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task WriteEquipped(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
+    private async Task WriteEquipped(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "INSERT INTO ws_equipped (steamid, team, defindex, paint) VALUES (@sid, @team, @def, @paint) ON DUPLICATE KEY UPDATE paint = @paint;";
         AddWeaponKey(command, steamId, team, defIndex, paint);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task WriteKnife(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex)
+    private async Task WriteKnife(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -739,10 +798,10 @@ public sealed class WeaponSkinsDatabase
         {
             command.CommandText = "DELETE FROM ws_knives WHERE steamid = @sid AND team = @team;";
         }
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task WriteGeneratedWeapon(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, EconItemPreview item, float wear)
+    private async Task WriteGeneratedWeapon(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, SharedEconPreview item, float wear)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -752,37 +811,37 @@ public sealed class WeaponSkinsDatabase
         command.Parameters.AddWithValue("@seed", Math.Clamp(item.PaintSeed, 0, 1000));
         command.Parameters.AddWithValue("@tag", item.CustomName is { Length: > 0 } name ? (name.Length > 64 ? name[..64] : name) : DBNull.Value);
         command.Parameters.AddWithValue("@stattrak", item.StatTrak ? Math.Max(0, item.KillEaterValue) : -1);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task ClearGeneratedExtras(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
+    private async Task ClearGeneratedExtras(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
     {
         await using (var stickers = connection.CreateCommand())
         {
             stickers.Transaction = transaction;
             stickers.CommandText = "DELETE FROM ws_stickers WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(stickers, steamId, team, defIndex, paint);
-            await stickers.ExecuteNonQueryAsync();
+            await stickers.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using var charms = connection.CreateCommand();
         charms.Transaction = transaction;
         charms.CommandText = "DELETE FROM ws_charms WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
         AddWeaponKey(charms, steamId, team, defIndex, paint);
-        await charms.ExecuteNonQueryAsync();
+        await charms.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task WriteGeneratedStickers(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, List<EconSticker> source)
+    private async Task WriteGeneratedStickers(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, List<SharedEconSticker> source)
     {
         await using (var clear = connection.CreateCommand())
         {
             clear.Transaction = transaction;
             clear.CommandText = "DELETE FROM ws_stickers WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(clear, steamId, team, defIndex, paint);
-            await clear.ExecuteNonQueryAsync();
+            await clear.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        foreach (var sticker in MapGenStickers(source))
+        foreach (var sticker in global::WeaponSkins.CosmeticRules.MapStickers(source))
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
@@ -796,21 +855,21 @@ public sealed class WeaponSkinsDatabase
             command.Parameters.AddWithValue("@x", sticker.OffsetX);
             command.Parameters.AddWithValue("@y", sticker.OffsetY);
             command.Parameters.AddWithValue("@schema", sticker.Schema);
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
-    private static async Task WriteGeneratedCharm(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, List<EconSticker> source)
+    private async Task WriteGeneratedCharm(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint, List<SharedEconSticker> source)
     {
         await using (var clear = connection.CreateCommand())
         {
             clear.Transaction = transaction;
             clear.CommandText = "DELETE FROM ws_charms WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(clear, steamId, team, defIndex, paint);
-            await clear.ExecuteNonQueryAsync();
+            await clear.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var charm = source.FirstOrDefault(value => value.Id > 0);
+        var charm = global::WeaponSkins.CosmeticRules.MapCharm(source);
         if (charm == null)
             return;
 
@@ -825,75 +884,25 @@ public sealed class WeaponSkinsDatabase
         command.Parameters.AddWithValue("@x", charm.OffsetX);
         command.Parameters.AddWithValue("@y", charm.OffsetY);
         command.Parameters.AddWithValue("@z", charm.OffsetZ);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private sealed record GeneratedSticker(int Slot, int Id, float Wear, float Scale, float Rotation, float OffsetX, float OffsetY, int Schema);
-
-    private static List<GeneratedSticker> MapGenStickers(List<EconSticker> source)
-    {
-        const int slots = 6;
-        var result = new List<GeneratedSticker>();
-        var used = new bool[slots];
-        var nextFree = 0;
-        var nextZero = 4;
-
-        foreach (var sticker in source)
-        {
-            if (sticker.Id <= 0 || sticker.Slot < 0 || sticker.Slot > 31 || result.Count >= 5)
-                continue;
-
-            var origin = sticker.Slot;
-            var slot = origin;
-            var schema = 0;
-            if (origin >= slots || used[origin])
-            {
-                schema = origin;
-                if (origin == 0)
-                {
-                    while (nextZero < slots && used[nextZero])
-                        nextZero++;
-                    slot = nextZero < slots ? nextZero++ : TakeFreeSlot(used, ref nextFree);
-                }
-                else
-                    slot = TakeFreeSlot(used, ref nextFree);
-                if (slot < 0)
-                    continue;
-            }
-            else if (origin >= 4)
-                schema = origin;
-
-            used[slot] = true;
-            result.Add(new GeneratedSticker(slot, sticker.Id, sticker.Wear, sticker.Scale == 0f ? 1f : sticker.Scale,
-                sticker.Rotation, sticker.OffsetX, sticker.OffsetY, schema));
-        }
-
-        return result;
-    }
-
-    private static int TakeFreeSlot(bool[] used, ref int cursor)
-    {
-        while (cursor < used.Length && used[cursor])
-            cursor++;
-        return cursor < used.Length ? cursor++ : -1;
-    }
-
-    private static async Task QueueSync(MySqlConnection connection, MySqlTransaction transaction, ulong steamId)
+    private async Task QueueSync(MySqlConnection connection, MySqlTransaction transaction, ulong steamId)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "INSERT INTO ws_sync_queue (steamid) VALUES (@sid);";
         command.Parameters.AddWithValue("@sid", steamId);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task DeleteCode(MySqlConnection connection, MySqlTransaction transaction, ulong steamId)
+    private async Task DeleteCode(MySqlConnection connection, MySqlTransaction transaction, ulong steamId)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "DELETE FROM ws_link_codes WHERE steamid = @sid;";
         command.Parameters.AddWithValue("@sid", steamId);
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static void AddWeaponKey(MySqlCommand command, ulong steamId, int team, int defIndex, int paint)
