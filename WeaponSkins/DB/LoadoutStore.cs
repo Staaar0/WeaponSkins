@@ -46,7 +46,9 @@ public sealed class LoadoutStore
 	private readonly Dictionary<StatTrakKey, int> pendingStatTrak = [];
 	private readonly Dictionary<ulong, Task> statTrakFlushes = [];
 	private readonly SemaphoreSlim writeSlots = new(8, 8);
-	private readonly SemaphoreSlim loadSlots = new(2, 2);
+	// Do not serialize a busy join wave through only two readers. Keep reads
+	// bounded below the connection pool limit; writes retain their own queue.
+	private readonly SemaphoreSlim loadSlots = new(8, 8);
 	private readonly CancellationTokenSource writeCancellation = new();
 	private long retriedWrites;
 	private long rejectedWrites;

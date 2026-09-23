@@ -14,9 +14,13 @@ public static class EconAttributes
 
 	public static void Init(ILogger logger)
 	{
+		setAttribute = null;
 		try
 		{
-			setAttribute = new MemoryFunctionVoid<nint, string, float>(GameData.GetSignature("CAttributeList_SetOrAddAttributeValueByName"));
+			var function = new MemoryFunctionVoid<nint, string, float>(GameData.GetSignature("CAttributeList_SetOrAddAttributeValueByName"));
+			if (function.Handle == IntPtr.Zero)
+				throw new InvalidOperationException("CAttributeList_SetOrAddAttributeValueByName did not resolve; update weaponskins.json for the installed CS2 build");
+			setAttribute = function;
 		}
 		catch (Exception ex)
 		{
@@ -49,4 +53,3 @@ public static class EconAttributes
 		item.AccountID = (uint)(steamId & 0xFFFFFFFF);
 	}
 }
-

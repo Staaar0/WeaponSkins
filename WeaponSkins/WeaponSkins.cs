@@ -16,7 +16,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.3";
+	public override string ModuleVersion => "1.1.4";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -181,7 +181,24 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			FinishLoad(hotReload);
 		}
 
-		RequestCatalogLoad();
+		// Restore catalog availability during Load without waiting for HTTP.
+		// Resource precaching and the first joining player can use bundled data;
+		// the online catalog is still refreshed atomically in the background.
+		try
+		{
+			var local = Catalog.PrepareAsync(Config.Api, false, catalogCancellation.Token)
+				.GetAwaiter().GetResult();
+			Catalog.Publish(local);
+			Menus.Prewarm();
+			FinishLoad(hotReload);
+		}
+		catch (Exception ex)
+		{
+			Logger.LogWarning("Local item data could not be loaded: {Error}", ex.GetBaseException().Message);
+		}
+
+		if (Db.Configured || !Catalog.Loaded)
+			RequestCatalogLoad();
 	}
 
 	public void RequestCatalogLoad(Action<bool>? completed = null)
