@@ -1,27 +1,8 @@
 namespace WeaponSkins;
 
-// Shared value transformations. No game natives or database calls belong here.
+// Convert inspect-code decorations for the embedded Discord bot.
 public static class CosmeticRules
 {
-	public static void CopyEntry(WeaponEntry target, WeaponEntry source, bool copyDecorations)
-	{
-		target.Paint = source.Paint;
-		target.Wear = source.Wear;
-		target.Seed = source.Seed;
-		target.NameTag = source.NameTag;
-		target.StatTrak = source.StatTrak;
-		target.Stickers = copyDecorations ? source.Stickers.Select(Clone).ToList() : [];
-		target.Charm = copyDecorations && source.Charm != null ? Clone(source.Charm) : null;
-	}
-
-	public static void FillEntry(WeaponEntry entry, EconItemPreview item)
-	{
-		entry.Wear = item.PaintWear > 0f ? item.PaintWear : 0.000001f;
-		entry.Seed = item.PaintSeed;
-		entry.NameTag = item.CustomName is { Length: > 0 } name ? (name.Length > 64 ? name[..64] : name) : null;
-		entry.StatTrak = item.StatTrak ? Math.Max(item.KillEaterValue, 0) : -1;
-	}
-
 	public static List<StickerEntry> MapStickers(List<EconSticker> source)
 	{
 		const int slots = 6;
@@ -104,27 +85,4 @@ public static class CosmeticRules
 			OffsetZ = charm.OffsetZ
 		};
 	}
-
-	public static StickerEntry Clone(StickerEntry source) => new()
-	{
-		Slot = source.Slot,
-		Id = source.Id,
-		Wear = source.Wear,
-		Scale = source.Scale,
-		Rotation = source.Rotation,
-		OffsetX = source.OffsetX,
-		OffsetY = source.OffsetY,
-		Schema = source.Schema
-	};
-
-	public static CharmEntry Clone(CharmEntry source) => new()
-	{
-		Id = source.Id,
-		Pattern = source.Pattern,
-		Sticker = source.Sticker,
-		Highlight = source.Highlight,
-		OffsetX = source.OffsetX,
-		OffsetY = source.OffsetY,
-		OffsetZ = source.OffsetZ
-	};
 }

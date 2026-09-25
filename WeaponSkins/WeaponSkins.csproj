@@ -7,14 +7,9 @@
 		<LangVersion>latest</LangVersion>
 		<AssemblyName>WeaponSkins</AssemblyName>
 		<RootNamespace>WeaponSkins</RootNamespace>
-		<Version>1.1.4</Version>
+		<Version>1.1.5</Version>
 		<GenerateDependencyFile>false</GenerateDependencyFile>
 	</PropertyGroup>
-
-	<ItemGroup>
-		<!-- Older source overlays may still contain the superseded bot parser. -->
-		<Compile Remove="DiscordBot/Database/EconItemPreview.cs" />
-	</ItemGroup>
 
 	<ItemGroup>
 		<PackageReference Include="CounterStrikeSharp.API" Version="1.0.371" />

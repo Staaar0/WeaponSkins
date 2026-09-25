@@ -22,16 +22,16 @@ public sealed class ApiClient : IDisposable
 		this.dataDirectory = dataDirectory;
 	}
 
-	public async Task<JsonDocument> Fetch(string file, CancellationToken cancellationToken = default)
+	public async Task<JsonDocument> Fetch(string file)
 	{
 		Stream stream;
 		if (dataDirectory != null)
 			stream = File.OpenRead(Path.Combine(dataDirectory, $"{file}.json"));
 		else
-			stream = await http!.GetStreamAsync($"{baseUrl}/{language}/{file}.json", cancellationToken);
+			stream = await http!.GetStreamAsync($"{baseUrl}/{language}/{file}.json");
 
 		await using (stream)
-			return await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+			return await JsonDocument.ParseAsync(stream);
 	}
 
 	public void Dispose()

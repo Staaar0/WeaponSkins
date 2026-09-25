@@ -17,8 +17,8 @@ public sealed class SkinMenus
 
 	private readonly WeaponSkins plugin;
 	private readonly Dictionary<int, DateTime> agentChange = [];
-	private readonly Dictionary<int, List<MenuItem>> paintItems = [];
-	private readonly Dictionary<int, List<MenuItem>> glovePaintItems = [];
+	private Dictionary<int, List<MenuItem>> paintItems = [];
+	private Dictionary<int, List<MenuItem>> glovePaintItems = [];
 	private readonly object stickerCacheSync = new();
 	private List<MenuItem>? stickerItems;
 	private StickerBrowser? stickerBrowser;
@@ -28,12 +28,11 @@ public sealed class SkinMenus
 	public SkinMenus(WeaponSkins plugin)
 	{
 		this.plugin = plugin;
-		Editor = new LoadoutEditor(plugin.Catalog, plugin.Store, plugin.Save);
 	}
 
 	private CatalogService Catalog => plugin.Catalog;
 	private PlayerCache Cache => plugin.Cache;
-	private LoadoutEditor Editor { get; }
+	private LoadoutStore Store => plugin.Store;
 	private WeaponApplier Applier => plugin.Applier;
 	private MenuRenderer Renderer => plugin.Menu;
 
@@ -139,7 +138,13 @@ public sealed class SkinMenus
 			return;
 
 		var def = session.Ctx.WeaponDef;
-		Editor.SetPaint(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, paint);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).Equip(def, paint?.Paint ?? 0);
+			if (paint != null)
+				entry.Wear = Math.Clamp(entry.Wear, MinimumWeaponWear(def, paint), paint.MaxFloat);
+			plugin.Save(Store.SaveWeaponAndEquip(player.SteamID, team, def, entry));
+		}
 
 		Applier.RefreshOwned(player, def);
 		plugin.Reply(player, "skin_set", paint?.Name ?? plugin.Text("menu.default"));
@@ -229,7 +234,17 @@ public sealed class SkinMenus
 		if (loadout == null || !Skinned(player, def))
 			return;
 
-		var applied = Editor.SetWear(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, wear);
+		var applied = wear;
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			var paint = Catalog.FindPaint(def, entry.Paint);
+			applied = paint != null
+				? Math.Clamp(wear, MinimumWeaponWear(def, paint), paint.MaxFloat)
+				: Math.Clamp(wear, KnifeService.IsKnifeDef(def) ? KnifeService.MinimumWear : 0.000001f, 1f);
+			entry.Wear = applied;
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+		}
 
 		Applier.RefreshOwned(player, def);
 		plugin.Reply(player, "wear_set", applied.ToString("0.######", CultureInfo.InvariantCulture));
@@ -259,7 +274,12 @@ public sealed class SkinMenus
 		if (loadout == null || !Skinned(player, def))
 			return;
 
-		Editor.SetSeed(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, seed);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			entry.Seed = seed;
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+		}
 
 		Applier.RefreshOwned(player, def);
 		plugin.Reply(player, "seed_set", seed);
@@ -271,7 +291,14 @@ public sealed class SkinMenus
 		if (loadout == null || !Skinned(player, def))
 			return;
 
-		var enabled = Editor.ToggleStatTrak(loadout, player.SteamID, PlayerCache.TargetTeams(player), def);
+		var enabled = false;
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			entry.StatTrak = entry.StatTrak >= 0 ? -1 : 0;
+			enabled = entry.StatTrak >= 0;
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+		}
 
 		Applier.RefreshOwned(player, def);
 		plugin.Reply(player, enabled ? "stattrak_on" : "stattrak_off", Catalog.WeaponName(def));
@@ -309,7 +336,12 @@ public sealed class SkinMenus
 		if (loadout == null || !Skinned(player, def))
 			return;
 
-		Editor.SetNameTag(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, tag);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			entry.NameTag = tag;
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+		}
 
 		Applier.RefreshOwned(player, def);
 		if (tag == null)
@@ -340,7 +372,11 @@ public sealed class SkinMenus
 			return;
 
 		var def = knife?.DefIndex ?? 0;
-		Editor.SetKnife(loadout, player.SteamID, PlayerCache.TargetTeams(player), def);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			loadout.For(team).Knife = def;
+			plugin.Save(Store.SaveKnife(player.SteamID, team, def));
+		}
 
 		if (def > 0)
 			Applier.RefreshOwned(player, def);
@@ -385,7 +421,13 @@ public sealed class SkinMenus
 		if (loadout == null)
 			return;
 
-		Editor.ResetGloves(loadout, player.SteamID, PlayerCache.TargetTeams(player));
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var side = loadout.For(team);
+			side.GloveDef = 0;
+			side.GlovePaint = 0;
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+		}
 
 		plugin.GloveApply.Restore(player);
 		plugin.Reply(player, "gloves_set", plugin.Text("menu.default"));
@@ -420,7 +462,14 @@ public sealed class SkinMenus
 			return;
 
 		var def = session.Ctx.GloveDef;
-		Editor.SetGlovePaint(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, paint);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var side = loadout.For(team);
+			side.GloveDef = def;
+			side.GlovePaint = paint.Paint;
+			side.Gloves.Wear = Math.Clamp(side.Gloves.Wear, MinWear(paint), paint.MaxFloat);
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+		}
 
 		plugin.GloveApply.Apply(player, true);
 		plugin.Reply(player, "gloves_set", paint.Name);
@@ -573,7 +622,12 @@ public sealed class SkinMenus
 		if (loadout == null)
 			return;
 
-		Editor.SetGloveSeed(loadout, player.SteamID, PlayerCache.TargetTeams(player), seed);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var side = loadout.For(team);
+			side.Gloves.Seed = seed;
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+		}
 
 		plugin.GloveApply.Apply(player, true);
 		plugin.Reply(player, "seed_set", seed);
@@ -585,7 +639,17 @@ public sealed class SkinMenus
 		if (loadout == null)
 			return;
 
-		var applied = Editor.SetGloveWear(loadout, player.SteamID, PlayerCache.TargetTeams(player), wear);
+		var applied = wear;
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var side = loadout.For(team);
+			var paint = Catalog.FindPaint(side.GloveDef, side.GlovePaint);
+			applied = paint != null
+				? Math.Clamp(wear, MinWear(paint), paint.MaxFloat)
+				: Math.Clamp(wear, 0.000001f, 1f);
+			side.Gloves.Wear = applied;
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+		}
 
 		plugin.GloveApply.Apply(player, true);
 		plugin.Reply(player, "wear_set", applied.ToString("0.######", CultureInfo.InvariantCulture));
@@ -661,7 +725,8 @@ public sealed class SkinMenus
 		if (agent != null)
 			Renderer.ShowImage(player, agent.Image);
 
-		Editor.SetAgent(loadout, player.SteamID, team, agent?.Model);
+		loadout.For(team).AgentModel = agent?.Model;
+		plugin.Save(Store.SaveAgent(player.SteamID, team, agent?.Model));
 
 		if (player.Team == team)
 			plugin.Profile.ApplyAgent(player);
@@ -694,7 +759,8 @@ public sealed class SkinMenus
 		if (loadout == null)
 			return;
 
-		Editor.SetMusic(loadout, player.SteamID, kit?.Id ?? 0);
+		loadout.MusicKit = kit?.Id ?? 0;
+		plugin.Save(Store.SaveMusic(player.SteamID, loadout.MusicKit));
 
 		plugin.Profile.Schedule(player);
 		plugin.Reply(player, "music_set", kit?.Name ?? plugin.Text("menu.default"));
@@ -738,14 +804,20 @@ public sealed class SkinMenus
 		if (loadout == null)
 			return;
 
-		Editor.SetPin(loadout, player.SteamID, pin?.Id ?? 0);
+		loadout.Pin = pin?.Id ?? 0;
+		plugin.Save(Store.SavePin(player.SteamID, loadout.Pin));
 
 		plugin.Profile.Schedule(player);
 		plugin.Reply(player, "pin_set", pin?.Name ?? plugin.Text("menu.default"));
 		Renderer.Rebuild(player, session);
 	}
 
+	private const int MenuStickerSlots = 4;
 
+	private static void DropUnmanagedStickers(WeaponEntry entry)
+	{
+		entry.Stickers.RemoveAll(s => s.Slot >= MenuStickerSlots);
+	}
 
 	private Menu StickerSlots(CCSPlayerController player, MenuSession session)
 	{
@@ -847,6 +919,59 @@ public sealed class SkinMenus
 				}
 			});
 		}
+	}
+
+	// Prepare first-use skin, knife, glove and sticker menus while the server
+	// is still loading. Install only the completed dictionaries on the game thread.
+	internal Action PrepareCatalogMenus(string defaultLabel)
+	{
+		var paintsByWeapon = new Dictionary<int, List<MenuItem>>();
+		var paintsByGlove = new Dictionary<int, List<MenuItem>>();
+		var gloves = Catalog.Gloves.Select(glove => glove.DefIndex).ToHashSet();
+
+		foreach (var (def, paints) in Catalog.Paints)
+		{
+			if (gloves.Contains(def))
+			{
+				var items = new List<MenuItem>(paints.Count);
+				foreach (var paint in paints)
+				{
+					var value = paint;
+					items.Add(new MenuItem(paint.Name, (p, s) => SetGlovePaint(p, s, value)));
+				}
+				paintsByGlove[def] = items;
+			}
+			else
+			{
+				var items = new List<MenuItem>(paints.Count + 1)
+				{
+					new(defaultLabel, (p, s) => SetPaint(p, s, null))
+				};
+				foreach (var paint in paints)
+				{
+					var value = paint;
+					items.Add(new MenuItem($"{paint.Name} ({paint.Paint})", (p, s) => SetPaint(p, s, value)));
+				}
+				paintsByWeapon[def] = items;
+			}
+		}
+
+		var stickers = plugin.Config.Stickers.Enabled ? Catalog.Stickers : [];
+		var preparedStickers = stickers.Count > 0 ? BuildStickerItems(stickers) : null;
+		var preparedBrowser = stickers.Count > 0 ? BuildStickerBrowser(stickers) : null;
+
+		return () =>
+		{
+			paintItems = paintsByWeapon;
+			glovePaintItems = paintsByGlove;
+			lock (stickerCacheSync)
+			{
+				stickerCacheGeneration++;
+				stickerItems = preparedStickers;
+				stickerBrowser = preparedBrowser;
+				stickerPrewarmTask = null;
+			}
+		};
 	}
 
 	private bool StickerCacheReady()
@@ -1131,7 +1256,24 @@ public sealed class SkinMenus
 			return;
 
 		var slot = session.Ctx.StickerSlot;
-		Editor.PlaceSticker(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, slot, sticker);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			if (slot < 0)
+			{
+				entry.Stickers.Clear();
+				for (var i = 0; i < 4; i++)
+					entry.Stickers.Add(new StickerEntry { Slot = i, Id = sticker.Id });
+			}
+			else
+			{
+				entry.Stickers.RemoveAll(s => s.Slot == slot);
+				entry.Stickers.Add(new StickerEntry { Slot = slot, Id = sticker.Id });
+			}
+
+			DropUnmanagedStickers(entry);
+			plugin.Save(Store.SaveWeaponAndStickers(player.SteamID, team, def, entry));
+		}
 
 		Applier.RefreshOwned(player, def);
 		if (slot < 0)
@@ -1149,7 +1291,17 @@ public sealed class SkinMenus
 			return;
 
 		var slot = session.Ctx.StickerSlot;
-		Editor.RemoveSticker(loadout, player.SteamID, PlayerCache.TargetTeams(player), def, slot);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			if (slot < 0)
+				entry.Stickers.Clear();
+			else
+				entry.Stickers.RemoveAll(s => s.Slot == slot);
+
+			DropUnmanagedStickers(entry);
+			plugin.Save(Store.SaveStickers(player.SteamID, team, def, entry.Paint, entry.Stickers));
+		}
 
 		Applier.RefreshOwned(player, def);
 		if (slot < 0)
@@ -1166,7 +1318,19 @@ public sealed class SkinMenus
 		if (loadout == null || !Skinned(player, def))
 			return;
 
-		Editor.RemoveAllStickers(loadout, player.SteamID, PlayerCache.TargetTeams(player), def);
+		foreach (var team in PlayerCache.TargetTeams(player))
+		{
+			var entry = loadout.For(team).GetOrAddWeapon(def);
+			entry.Stickers.Clear();
+			entry.Charm = null;
+			plugin.Save(Store.SaveStickersAndCharm(
+				player.SteamID,
+				team,
+				def,
+				entry.Paint,
+				entry.Stickers,
+				entry.Charm));
+		}
 
 		Applier.RefreshOwned(player, def);
 		plugin.Reply(player, "stickers_cleared");
@@ -1464,4 +1628,11 @@ public sealed class SkinMenus
 		return Cache.Get(player)?.For(PlayerCache.TargetTeams(player)[0]);
 	}
 
+	private static float MinWear(PaintDef paint) => Math.Max(paint.MinFloat, 0.000001f);
+
+	private static float MinimumWeaponWear(int def, PaintDef paint)
+	{
+		var minimum = KnifeService.IsKnifeDef(def) ? KnifeService.MinimumWear : 0.000001f;
+		return Math.Min(paint.MaxFloat, Math.Max(paint.MinFloat, minimum));
+	}
 }

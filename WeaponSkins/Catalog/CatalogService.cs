@@ -6,68 +6,39 @@ namespace WeaponSkins;
 
 public sealed class CatalogService
 {
-	public bool Loaded => Volatile.Read(ref data).Loaded;
+	public bool Loaded { get; private set; }
 
-	public IReadOnlyList<string> Categories { get => Volatile.Read(ref data).Categories; private set => data.Categories = value; }
-	public IReadOnlyDictionary<string, List<WeaponDef>> WeaponsByCategory { get => Volatile.Read(ref data).WeaponsByCategory; private set => data.WeaponsByCategory = value; }
-	public IReadOnlyDictionary<int, List<PaintDef>> Paints { get => Volatile.Read(ref data).Paints; private set => data.Paints = value; }
+	public IReadOnlyList<string> Categories { get; private set; } = [];
+	public IReadOnlyDictionary<string, List<WeaponDef>> WeaponsByCategory { get; private set; } = new Dictionary<string, List<WeaponDef>>();
+	public IReadOnlyDictionary<int, List<PaintDef>> Paints { get; private set; } = new Dictionary<int, List<PaintDef>>();
 
-	private IReadOnlyDictionary<(int DefIndex, int Paint), PaintDef> paintIndex
-	{
-		get => Volatile.Read(ref data).PaintIndex;
-		set => data.PaintIndex = value;
-	}
-	public IReadOnlyList<KnifeDef> Knives { get => Volatile.Read(ref data).Knives; private set => data.Knives = value; }
-	public IReadOnlyList<GloveDef> Gloves { get => Volatile.Read(ref data).Gloves; private set => data.Gloves = value; }
-	public IReadOnlyList<StickerDef> Stickers { get => Volatile.Read(ref data).Stickers; private set => data.Stickers = value; }
-	public IReadOnlyList<CharmDef> Charms { get => Volatile.Read(ref data).Charms; private set => data.Charms = value; }
-	public IReadOnlyList<AgentDef> AgentsT { get => Volatile.Read(ref data).AgentsT; private set => data.AgentsT = value; }
-	public IReadOnlyList<AgentDef> AgentsCT { get => Volatile.Read(ref data).AgentsCT; private set => data.AgentsCT = value; }
-	public IReadOnlyList<string> AgentFactionsT { get => Volatile.Read(ref data).AgentFactionsT; private set => data.AgentFactionsT = value; }
-	public IReadOnlyList<string> AgentFactionsCT { get => Volatile.Read(ref data).AgentFactionsCT; private set => data.AgentFactionsCT = value; }
-	public IReadOnlyDictionary<string, List<AgentDef>> AgentsByFactionT { get => Volatile.Read(ref data).AgentsByFactionT; private set => data.AgentsByFactionT = value; }
-	public IReadOnlyDictionary<string, List<AgentDef>> AgentsByFactionCT { get => Volatile.Read(ref data).AgentsByFactionCT; private set => data.AgentsByFactionCT = value; }
-	public IReadOnlyList<MusicDef> MusicKits { get => Volatile.Read(ref data).MusicKits; private set => data.MusicKits = value; }
-	public IReadOnlyList<PinDef> Pins { get => Volatile.Read(ref data).Pins; private set => data.Pins = value; }
-	public IReadOnlyDictionary<string, List<PinDef>> PinsByGroup { get => Volatile.Read(ref data).PinsByGroup; private set => data.PinsByGroup = value; }
-	public IReadOnlyList<string> PinGroups { get => Volatile.Read(ref data).PinGroups; private set => data.PinGroups = value; }
+	private IReadOnlyDictionary<(int DefIndex, int Paint), PaintDef> paintIndex =
+		new Dictionary<(int, int), PaintDef>();
+	public IReadOnlyList<KnifeDef> Knives { get; private set; } = [];
+	public IReadOnlyList<GloveDef> Gloves { get; private set; } = [];
+	public IReadOnlyList<StickerDef> Stickers { get; private set; } = [];
+	public IReadOnlyList<CharmDef> Charms { get; private set; } = [];
+	public IReadOnlyList<AgentDef> AgentsT { get; private set; } = [];
+	public IReadOnlyList<AgentDef> AgentsCT { get; private set; } = [];
+	public IReadOnlyList<string> AgentFactionsT { get; private set; } = [];
+	public IReadOnlyList<string> AgentFactionsCT { get; private set; } = [];
+	public IReadOnlyDictionary<string, List<AgentDef>> AgentsByFactionT { get; private set; } = new Dictionary<string, List<AgentDef>>();
+	public IReadOnlyDictionary<string, List<AgentDef>> AgentsByFactionCT { get; private set; } = new Dictionary<string, List<AgentDef>>();
+	public IReadOnlyList<MusicDef> MusicKits { get; private set; } = [];
+	public IReadOnlyList<PinDef> Pins { get; private set; } = [];
+	public IReadOnlyDictionary<string, List<PinDef>> PinsByGroup { get; private set; } = new Dictionary<string, List<PinDef>>();
+	public IReadOnlyList<string> PinGroups { get; private set; } = [];
 
-	public IReadOnlyDictionary<int, string> WeaponNames { get => Volatile.Read(ref data).WeaponNames; private set => data.WeaponNames = value; }
-	public IReadOnlyDictionary<int, string> WeaponClasses { get => Volatile.Read(ref data).WeaponClasses; private set => data.WeaponClasses = value; }
-	public IReadOnlyDictionary<int, string> StickerNames { get => Volatile.Read(ref data).StickerNames; private set => data.StickerNames = value; }
-	public IReadOnlyDictionary<int, string> CharmNames { get => Volatile.Read(ref data).CharmNames; private set => data.CharmNames = value; }
-	private CatalogSnapshot data = new();
+	public IReadOnlyDictionary<int, string> WeaponNames { get; private set; } = new Dictionary<int, string>();
+	public IReadOnlyDictionary<int, string> WeaponClasses { get; private set; } = new Dictionary<int, string>();
+	public IReadOnlyDictionary<int, string> StickerNames { get; private set; } = new Dictionary<int, string>();
+	public IReadOnlyDictionary<int, string> CharmNames { get; private set; } = new Dictionary<int, string>();
 
-	internal sealed class CatalogSnapshot
-	{
-		public bool Loaded;
-		public string Source = "local files";
-		public IReadOnlyDictionary<(int DefIndex, int Paint), PaintDef> PaintIndex = new Dictionary<(int, int), PaintDef>();
-		public IReadOnlyList<string> Categories { get; set; } = [];
-		public IReadOnlyDictionary<string, List<WeaponDef>> WeaponsByCategory { get; set; } = new Dictionary<string, List<WeaponDef>>();
-		public IReadOnlyDictionary<int, List<PaintDef>> Paints { get; set; } = new Dictionary<int, List<PaintDef>>();
-		public IReadOnlyList<KnifeDef> Knives { get; set; } = [];
-		public IReadOnlyList<GloveDef> Gloves { get; set; } = [];
-		public IReadOnlyList<StickerDef> Stickers { get; set; } = [];
-		public IReadOnlyList<CharmDef> Charms { get; set; } = [];
-		public IReadOnlyList<AgentDef> AgentsT { get; set; } = [];
-		public IReadOnlyList<AgentDef> AgentsCT { get; set; } = [];
-		public IReadOnlyList<string> AgentFactionsT { get; set; } = [];
-		public IReadOnlyList<string> AgentFactionsCT { get; set; } = [];
-		public IReadOnlyDictionary<string, List<AgentDef>> AgentsByFactionT { get; set; } = new Dictionary<string, List<AgentDef>>();
-		public IReadOnlyDictionary<string, List<AgentDef>> AgentsByFactionCT { get; set; } = new Dictionary<string, List<AgentDef>>();
-		public IReadOnlyList<MusicDef> MusicKits { get; set; } = [];
-		public IReadOnlyList<PinDef> Pins { get; set; } = [];
-		public IReadOnlyDictionary<string, List<PinDef>> PinsByGroup { get; set; } = new Dictionary<string, List<PinDef>>();
-		public IReadOnlyList<string> PinGroups { get; set; } = [];
-		public IReadOnlyDictionary<int, string> WeaponNames { get; set; } = new Dictionary<int, string>();
-		public IReadOnlyDictionary<int, string> WeaponClasses { get; set; } = new Dictionary<int, string>();
-		public IReadOnlyDictionary<int, string> StickerNames { get; set; } = new Dictionary<int, string>();
-		public IReadOnlyDictionary<int, string> CharmNames { get; set; } = new Dictionary<int, string>();
-	}
+
 
 	private readonly ILogger logger;
 	private readonly string dataDirectory;
+	private int loading;
 
 	public CatalogService(ILogger logger, string dataDirectory)
 	{
@@ -82,54 +53,73 @@ public sealed class CatalogService
 
 	public string WeaponName(int defIndex) => WeaponNames.TryGetValue(defIndex, out var name) ? name : $"#{defIndex}";
 
-	// Build privately. Only Publish changes what menus and game callbacks see.
-	internal async Task<CatalogSnapshot> PrepareAsync(ApiConfig config, bool useOnline, CancellationToken cancellationToken)
+	public bool LoadBlocking(ApiConfig config, bool useOnline)
 	{
-		var draft = new CatalogService(logger, dataDirectory);
-		if (useOnline)
+		try
 		{
-			try
-			{
-				using var api = new ApiClient(config);
-				await draft.LoadFrom(api, cancellationToken);
-				draft.data.Source = "online API";
-				draft.data.Loaded = true;
-				return draft.data;
-			}
-			catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-			{
-				logger.LogWarning("Online item data failed, using local files: {Error}", ex.Message);
-				draft = new CatalogService(logger, dataDirectory);
-			}
+			LoadAsync(config, useOnline).GetAwaiter().GetResult();
 		}
-		using var local = new ApiClient(dataDirectory);
-		await draft.LoadFrom(local, cancellationToken);
-		draft.data.Loaded = true;
-		return draft.data;
+		catch (Exception ex)
+		{
+			logger.LogError("Failed to load item data: {Error}", ex.Message);
+		}
+
+		return Loaded;
 	}
 
-	internal void Publish(CatalogSnapshot prepared)
+	public async Task LoadAsync(ApiConfig config, bool useOnline)
 	{
-		Volatile.Write(ref data, prepared);
-		logger.LogInformation("Item data loaded from {Source}: {Skins} skins, {Stickers} stickers, {Agents} agents, {Music} music kits, {Pins} pins, {Charms} charms",
-			prepared.Source, Paints.Sum(p => p.Value.Count), Stickers.Count, AgentsT.Count + AgentsCT.Count, MusicKits.Count, Pins.Count, Charms.Count);
+		if (Interlocked.Exchange(ref loading, 1) == 1)
+			return;
+
+		try
+		{
+			var source = "local files";
+			if (useOnline)
+			{
+				try
+				{
+					using var api = new ApiClient(config);
+					await LoadFrom(api);
+					source = "online API";
+				}
+				catch (Exception ex)
+				{
+					logger.LogWarning("Online item data failed, using local files: {Error}", ex.Message);
+					using var local = new ApiClient(dataDirectory);
+					await LoadFrom(local);
+				}
+			}
+			else
+			{
+				using var local = new ApiClient(dataDirectory);
+				await LoadFrom(local);
+			}
+
+			Loaded = true;
+			logger.LogInformation("Item data loaded from {Source}: {Skins} skins, {Stickers} stickers, {Agents} agents, {Music} music kits, {Pins} pins, {Charms} charms",
+				source, Paints.Sum(p => p.Value.Count), Stickers.Count, AgentsT.Count + AgentsCT.Count, MusicKits.Count, Pins.Count, Charms.Count);
+		}
+		finally
+		{
+			Interlocked.Exchange(ref loading, 0);
+		}
 	}
 
-	private async Task LoadFrom(ApiClient api, CancellationToken cancellationToken)
+	private async Task LoadFrom(ApiClient api)
 	{
-		var skinsTask = api.Fetch("skins", cancellationToken);
-		var stickersTask = api.Fetch("stickers", cancellationToken);
-		var agentsTask = api.Fetch("agents", cancellationToken);
-		var musicTask = api.Fetch("music_kits", cancellationToken);
-		var pinsTask = api.Fetch("collectibles", cancellationToken);
-		var charmsTask = api.Fetch("keychains", cancellationToken);
+		var skinsTask = api.Fetch("skins");
+		var stickersTask = api.Fetch("stickers");
+		var agentsTask = api.Fetch("agents");
+		var musicTask = api.Fetch("music_kits");
+		var pinsTask = api.Fetch("collectibles");
+		var charmsTask = api.Fetch("keychains");
 		Task<JsonDocument>[] tasks = [skinsTask, stickersTask, agentsTask, musicTask, pinsTask, charmsTask];
 		var disposeFrom = 0;
 
 		try
 		{
 			await Task.WhenAll(tasks);
-			cancellationToken.ThrowIfCancellationRequested();
 			disposeFrom = 1;
 			ParseSkins(skinsTask.Result);
 			disposeFrom = 2;
