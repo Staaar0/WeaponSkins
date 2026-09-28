@@ -120,7 +120,7 @@ public sealed class PlayerCache
 						loadouts[steamId] = loadout;
 					}
 
-					Server.NextFrame(() =>
+					Server.NextWorldUpdate(() =>
 					{
 						if (!token.IsCancellationRequested &&
 							loadouts.TryGetValue(steamId, out var current) &&

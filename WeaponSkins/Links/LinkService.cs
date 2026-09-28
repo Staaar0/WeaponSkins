@@ -55,7 +55,7 @@ public sealed class LinkService
 		cancellation = new CancellationTokenSource();
 		loop = Poll(cancellation.Token);
 		if (UsesDiscordUtilities)
-			Server.NextFrame(SyncDiscordUtilities);
+			Server.NextWorldUpdate(SyncDiscordUtilities);
 	}
 
 	public void Stop()
@@ -107,6 +107,10 @@ public sealed class LinkService
 				online.Add(steamId);
 
 			SyncDiscordUtilities(steamId);
+			// Link state is kept across map changes, so Complete() will not fetch
+			// again. Fetch is a no-op while the loadout is cached or loading.
+			if (IsLinked(steamId))
+				plugin.Cache.Fetch(steamId);
 			return;
 		}
 
@@ -139,6 +143,13 @@ public sealed class LinkService
 			queried.Remove(steamId);
 			nextCode.Remove(steamId);
 		}
+	}
+
+	// Unlinked players get the link reminder again on every new map.
+	public void ResetNotices()
+	{
+		lock (sync)
+			queried.Clear();
 	}
 
 	public void RequestCode(CCSPlayerController player)
@@ -230,7 +241,7 @@ public sealed class LinkService
 		{
 			if (await store.IsLinked(steamId, token))
 			{
-				Server.NextFrame(() => Complete(steamId, true));
+				Server.NextWorldUpdate(() => Complete(steamId, true));
 				return;
 			}
 		}
@@ -317,7 +328,7 @@ public sealed class LinkService
 
 				if (UsesDiscordUtilities)
 				{
-					Server.NextFrame(SyncDiscordUtilities);
+					Server.NextWorldUpdate(SyncDiscordUtilities);
 				}
 
 				if (CanIssueCodes)
@@ -340,19 +351,43 @@ public sealed class LinkService
 		}
 	}
 
+	// Runs every second on the game thread: one copy of the link table and one pass over
+	// the player slots, instead of both for every online player.
 	private void SyncDiscordUtilities()
 	{
-		if (plugin.Stopping)
+		if (plugin.Stopping || discordUtilities == null)
 			return;
 
-		foreach (var steamId in Online())
-			SyncDiscordUtilities(steamId);
+		var online = Online();
+		if (online.Count == 0 || !discordUtilities.TryGetLinkedPlayers(out var linkedPlayers))
+			return;
+
+		var players = new Dictionary<ulong, CCSPlayerController>();
+		foreach (var player in Utilities.GetPlayers())
+		{
+			if (!player.IsBot && player.AuthorizedSteamID is { } authorized)
+				players[authorized.SteamId64] = player;
+		}
+
+		foreach (var steamId in online)
+		{
+			if (players.TryGetValue(steamId, out var player))
+				ApplyDiscordUtilitiesLink(steamId, player, linkedPlayers.Contains(steamId));
+		}
 	}
 
 	private void SyncDiscordUtilities(ulong steamId)
 	{
 		if (plugin.Stopping || Player(steamId) is not { } player ||
 			discordUtilities == null || !discordUtilities.TryIsLinked(steamId, out var isLinked))
+			return;
+
+		ApplyDiscordUtilitiesLink(steamId, player, isLinked);
+	}
+
+	private void ApplyDiscordUtilitiesLink(ulong steamId, CCSPlayerController player, bool isLinked)
+	{
+		if (plugin.Stopping)
 			return;
 
 		if (isLinked)
@@ -391,7 +426,7 @@ public sealed class LinkService
 		if (found.Count == 0)
 			return;
 
-		Server.NextFrame(() =>
+		Server.NextWorldUpdate(() =>
 		{
 			foreach (var steamId in found)
 				Complete(steamId, false);
@@ -420,13 +455,18 @@ public sealed class LinkService
 
 	private void Refresh(ulong steamId)
 	{
-		if (plugin.Stopping || (Required && !IsLinked(steamId)) || Player(steamId) is not { } player)
+		if (plugin.Stopping || (Required && !IsLinked(steamId)))
 			return;
 
-		plugin.Menu.Close(player);
+		// The sync row is already deleted, so reload even while the player is
+		// still loading the next map, otherwise this change would be lost.
+		var player = Player(steamId);
+		if (player != null)
+			plugin.Menu.Close(player);
 		plugin.Save(plugin.Store.FlushStatTrak(steamId));
 		plugin.Cache.Reload(steamId);
-		plugin.Reply(player, "loadout_synced");
+		if (player != null)
+			plugin.Reply(player, "loadout_synced");
 	}
 
 	private async Task Maintain(CancellationToken cancellationToken)

@@ -75,7 +75,8 @@ public sealed class CatalogService
 		try
 		{
 			var source = "local files";
-			if (useOnline)
+			// An empty base_url keeps the bundled item files and skips the download.
+			if (useOnline && !string.IsNullOrWhiteSpace(config.BaseUrl))
 			{
 				try
 				{

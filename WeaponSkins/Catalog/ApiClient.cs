@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 
 namespace WeaponSkins;
@@ -13,7 +14,11 @@ public sealed class ApiClient : IDisposable
 	{
 		baseUrl = config.BaseUrl.TrimEnd('/');
 		language = string.IsNullOrWhiteSpace(config.Language) ? "en" : config.Language;
-		http = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds)) };
+		// The catalog is ~26 MB of JSON; accepting gzip/brotli cuts the download to a few MB.
+		http = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.All })
+		{
+			Timeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds))
+		};
 		http.DefaultRequestHeaders.UserAgent.ParseAdd("WeaponSkins");
 	}
 

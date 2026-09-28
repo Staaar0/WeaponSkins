@@ -38,7 +38,10 @@ public sealed class CatalogService : IDisposable
 		this.cacheDirectory = cacheDirectory;
 		this.fallbackDirectory = fallbackDirectory;
 		baseUrl = $"{config.BaseUrl.TrimEnd('/')}/{(string.IsNullOrWhiteSpace(config.Language) ? "en" : config.Language)}";
-		http = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds)) };
+		http = new HttpClient(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
+		{
+			Timeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds))
+		};
 		Directory.CreateDirectory(this.cacheDirectory);
 		http.DefaultRequestHeaders.UserAgent.ParseAdd("WeaponSkins_Bot");
 	}

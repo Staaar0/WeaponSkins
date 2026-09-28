@@ -21,9 +21,9 @@ public sealed class Database
 			Database = config.Name,
 			Pooling = true,
 			MinimumPoolSize = 0,
-			MaximumPoolSize = 10,
+			MaximumPoolSize = 25,
 			ConnectionTimeout = 30,
-			ConnectionIdleTimeout = 30,
+			ConnectionIdleTimeout = 180,
 			DefaultCommandTimeout = 30
 		};
 
@@ -282,10 +282,22 @@ public sealed class Database
 			await Execute(connection, "ALTER TABLE ws_gloves DROP COLUMN seed;");
 		}
 
-		await Execute(connection, """
-			INSERT IGNORE INTO ws_equipped (steamid, team, defindex, paint)
-			SELECT steamid, team, defindex, paint FROM ws_weapons;
-			""");
+		// Every server runs this on start. The plain SELECT is a non-locking read, while the
+		// INSERT ... SELECT share-locks all of ws_weapons and stalls saves from servers that are
+		// already running, so only do the insert when some weapon really lacks an equipped row.
+		if (await Scalar(connection, """
+			SELECT COUNT(*) FROM (
+				SELECT 1 FROM ws_weapons w
+				LEFT JOIN ws_equipped e ON e.steamid = w.steamid AND e.team = w.team AND e.defindex = w.defindex
+				WHERE e.steamid IS NULL
+				LIMIT 1) missing;
+			""", "", "") > 0)
+		{
+			await Execute(connection, """
+				INSERT IGNORE INTO ws_equipped (steamid, team, defindex, paint)
+				SELECT steamid, team, defindex, paint FROM ws_weapons;
+				""");
+		}
 
 		await Collapse(connection, "ws_music", MusicBody, "kit");
 		await Collapse(connection, "ws_pins", PinsBody, "pin");

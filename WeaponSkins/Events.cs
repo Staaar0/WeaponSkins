@@ -44,6 +44,7 @@ public sealed class Events
 		plugin.RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath);
 		plugin.RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
 		plugin.RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
+		plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 		plugin.RegisterEventHandler<EventItemPickup>(OnItemPickup);
 		plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
 		plugin.AddCommandListener("say", OnSay);
@@ -74,7 +75,7 @@ public sealed class Events
 		try
 		{
 			var weapon = hook.GetReturn<CBasePlayerWeapon>();
-			if (weapon == null || !weapon.IsValid)
+			if (weapon == null || !weapon.IsValid || !weapon.DesignerName.StartsWith("weapon_", StringComparison.Ordinal))
 				return HookResult.Continue;
 
 			var weaponHandle = weapon.EntityHandle.Raw;
@@ -330,6 +331,9 @@ public sealed class Events
 		return HookResult.Continue;
 	}
 
+	// CounterStrikeSharp also calls OnClientDisconnect for every player when the
+	// map changes, and they reconnect a few seconds later. Only per-slot state is
+	// cleared here; the cached loadout survives until OnPlayerDisconnect.
 	private void OnClientDisconnect(int slot)
 	{
 		steamIdsBySlot.Remove(slot, out var steamId);
@@ -342,12 +346,7 @@ public sealed class Events
 		}
 
 		if (steamId > 0)
-		{
 			plugin.Save(plugin.Store.FlushStatTrak(steamId));
-			plugin.Cache.Drop(steamId);
-			plugin.Links.Forget(steamId);
-			plugin.ForgetPermissions(steamId);
-		}
 
 		pendingInventoryApplies.Remove(slot);
 		plugin.DropActionState(slot);
@@ -358,11 +357,30 @@ public sealed class Events
 		plugin.Menus.Drop(slot);
 	}
 
+	// player_disconnect only fires when a player really leaves, not on map change.
+	private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
+	{
+		var player = @event.Userid;
+		if (player != null && player.IsValid && player.IsBot)
+			return HookResult.Continue;
+
+		var steamId = player != null && player.IsValid && player.SteamID > 0 ? player.SteamID : @event.Xuid;
+		if (steamId == 0)
+			return HookResult.Continue;
+
+		plugin.Save(plugin.Store.FlushStatTrak(steamId));
+		plugin.Cache.Drop(steamId);
+		plugin.Links.Forget(steamId);
+		plugin.ForgetPermissions(steamId);
+		return HookResult.Continue;
+	}
+
 	private void OnMapStart(string mapName)
 	{
 		worldGeneration++;
 		plugin.Menu.CloseAll();
 		plugin.Applier.Reset();
+		plugin.Links.ResetNotices();
 		pendingInventoryApplies.Clear();
 		spawnTicks.Clear();
 		plugin.Profile.DropAll();
@@ -407,8 +425,11 @@ public sealed class Events
 
 	private void OnLoadoutReady(ulong steamId)
 	{
+		if (plugin.Stopping)
+			return;
+
 		var player = Utilities.GetPlayerFromSteamId(steamId);
-		if (player == null || !player.IsValid)
+		if (player == null || !player.IsValid || player.IsBot)
 			return;
 
 		steamIdsBySlot[player.Slot] = steamId;

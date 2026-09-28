@@ -16,7 +16,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.5";
+	public override string ModuleVersion => "1.1.6";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -215,7 +215,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			return;
 		}
 
-		Server.NextFrame(() =>
+		Server.NextWorldUpdate(() =>
 		{
 			if (!stopping)
 				FinishLoad(true);

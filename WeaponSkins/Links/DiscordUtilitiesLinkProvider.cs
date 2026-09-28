@@ -29,6 +29,18 @@ public sealed class DiscordUtilitiesLinkProvider
 	public bool TryIsLinked(ulong steamId, out bool linked)
 	{
 		linked = false;
+		if (!TryGetLinkedPlayers(out var players))
+			return false;
+
+		linked = players.Contains(steamId);
+		return true;
+	}
+
+	// GetLinkedPlayers returns a fresh copy of every link on the Discord server, so a sync
+	// pass fetches it once and checks all online players against that one copy.
+	public bool TryGetLinkedPlayers(out IDictionary players)
+	{
+		players = null!;
 		if (!Connect())
 			return false;
 
@@ -41,10 +53,10 @@ public sealed class DiscordUtilitiesLinkProvider
 				return false;
 			}
 
-			if (getLinkedPlayers!.Invoke(api, null) is not IDictionary players)
+			if (getLinkedPlayers!.Invoke(api, null) is not IDictionary linkedPlayers)
 				return false;
 
-			linked = players.Contains(steamId);
+			players = linkedPlayers;
 			return true;
 		}
 		catch (Exception ex)
