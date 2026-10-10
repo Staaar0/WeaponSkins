@@ -142,7 +142,7 @@ public sealed class SkinMenus
 		{
 			var entry = loadout.For(team).Equip(def, paint?.Paint ?? 0);
 			if (paint != null)
-				entry.Wear = Math.Clamp(entry.Wear, MinimumWeaponWear(def, paint), paint.MaxFloat);
+				entry.Wear = Math.Clamp(CosmeticRules.IsValidWear(entry.Wear) ? entry.Wear : 0.000001f, MinimumWeaponWear(def, paint), paint.MaxFloat);
 			plugin.Save(Store.SaveWeaponAndEquip(player.SteamID, team, def, entry));
 		}
 
@@ -213,7 +213,7 @@ public sealed class SkinMenus
 		items.Add(new MenuItem(plugin.Text("menu.wear_custom"), (p, s) =>
 			Renderer.Prompt(p, s, plugin.Text("prompt.wear"), (pp, ss, text) =>
 			{
-				if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var wear) && wear is >= 0f and <= 1f)
+				if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var wear) && CosmeticRules.IsValidWear(wear))
 				{
 					apply(pp, ss, wear);
 					Renderer.Back(pp, ss);
@@ -230,6 +230,12 @@ public sealed class SkinMenus
 
 	public void SetWear(CCSPlayerController player, int def, float wear)
 	{
+		if (!CosmeticRules.IsValidWear(wear))
+		{
+			plugin.Reply(player, "wear_invalid");
+			return;
+		}
+
 		var loadout = Cache.Get(player);
 		if (loadout == null || !Skinned(player, def))
 			return;
@@ -243,7 +249,7 @@ public sealed class SkinMenus
 				? Math.Clamp(wear, MinimumWeaponWear(def, paint), paint.MaxFloat)
 				: Math.Clamp(wear, KnifeService.IsKnifeDef(def) ? KnifeService.MinimumWear : 0.000001f, 1f);
 			entry.Wear = applied;
-			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry, LoadoutStore.WeaponFields.Wear));
 		}
 
 		Applier.RefreshOwned(player, def);
@@ -259,7 +265,7 @@ public sealed class SkinMenus
 	{
 		Renderer.Prompt(player, session, plugin.Text("prompt.seed"), (p, s, text) =>
 		{
-			if (int.TryParse(text, out var seed) && seed is >= 0 and <= 1000)
+			if (int.TryParse(text, out var seed) && CosmeticRules.IsValidSeed(seed))
 				apply(p, s, seed);
 			else
 				plugin.Reply(p, "seed_invalid");
@@ -270,6 +276,12 @@ public sealed class SkinMenus
 
 	public void SetSeed(CCSPlayerController player, int def, int seed)
 	{
+		if (!CosmeticRules.IsValidSeed(seed))
+		{
+			plugin.Reply(player, "seed_invalid");
+			return;
+		}
+
 		var loadout = Cache.Get(player);
 		if (loadout == null || !Skinned(player, def))
 			return;
@@ -278,7 +290,7 @@ public sealed class SkinMenus
 		{
 			var entry = loadout.For(team).GetOrAddWeapon(def);
 			entry.Seed = seed;
-			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry, LoadoutStore.WeaponFields.Seed));
 		}
 
 		Applier.RefreshOwned(player, def);
@@ -297,7 +309,7 @@ public sealed class SkinMenus
 			var entry = loadout.For(team).GetOrAddWeapon(def);
 			entry.StatTrak = entry.StatTrak >= 0 ? -1 : 0;
 			enabled = entry.StatTrak >= 0;
-			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry, LoadoutStore.WeaponFields.StatTrak));
 		}
 
 		Applier.RefreshOwned(player, def);
@@ -340,7 +352,7 @@ public sealed class SkinMenus
 		{
 			var entry = loadout.For(team).GetOrAddWeapon(def);
 			entry.NameTag = tag;
-			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry));
+			plugin.Save(Store.SaveWeapon(player.SteamID, team, def, entry, LoadoutStore.WeaponFields.NameTag));
 		}
 
 		Applier.RefreshOwned(player, def);
@@ -426,7 +438,7 @@ public sealed class SkinMenus
 			var side = loadout.For(team);
 			side.GloveDef = 0;
 			side.GlovePaint = 0;
-			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side, LoadoutStore.WeaponFields.None));
 		}
 
 		plugin.GloveApply.Restore(player);
@@ -467,8 +479,8 @@ public sealed class SkinMenus
 			var side = loadout.For(team);
 			side.GloveDef = def;
 			side.GlovePaint = paint.Paint;
-			side.Gloves.Wear = Math.Clamp(side.Gloves.Wear, MinWear(paint), paint.MaxFloat);
-			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+			side.Gloves.Wear = Math.Clamp(CosmeticRules.IsValidWear(side.Gloves.Wear) ? side.Gloves.Wear : 0.000001f, MinWear(paint), paint.MaxFloat);
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side, LoadoutStore.WeaponFields.None));
 		}
 
 		plugin.GloveApply.Apply(player, true);
@@ -618,6 +630,12 @@ public sealed class SkinMenus
 
 	private void SetGloveSeed(CCSPlayerController player, int seed)
 	{
+		if (!CosmeticRules.IsValidSeed(seed))
+		{
+			plugin.Reply(player, "seed_invalid");
+			return;
+		}
+
 		var loadout = Cache.Get(player);
 		if (loadout == null)
 			return;
@@ -626,7 +644,7 @@ public sealed class SkinMenus
 		{
 			var side = loadout.For(team);
 			side.Gloves.Seed = seed;
-			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side, LoadoutStore.WeaponFields.Seed));
 		}
 
 		plugin.GloveApply.Apply(player, true);
@@ -635,6 +653,12 @@ public sealed class SkinMenus
 
 	private void SetGloveWear(CCSPlayerController player, float wear)
 	{
+		if (!CosmeticRules.IsValidWear(wear))
+		{
+			plugin.Reply(player, "wear_invalid");
+			return;
+		}
+
 		var loadout = Cache.Get(player);
 		if (loadout == null)
 			return;
@@ -648,7 +672,7 @@ public sealed class SkinMenus
 				? Math.Clamp(wear, MinWear(paint), paint.MaxFloat)
 				: Math.Clamp(wear, 0.000001f, 1f);
 			side.Gloves.Wear = applied;
-			plugin.Save(Store.SaveGloves(player.SteamID, team, side));
+			plugin.Save(Store.SaveGloves(player.SteamID, team, side, LoadoutStore.WeaponFields.Wear));
 		}
 
 		plugin.GloveApply.Apply(player, true);
@@ -921,8 +945,7 @@ public sealed class SkinMenus
 		}
 	}
 
-	// Prepare first-use skin, knife, glove and sticker menus while the server
-	// is still loading. Install only the completed dictionaries on the game thread.
+	// Build menus during startup, then install them on the game thread.
 	internal Action PrepareCatalogMenus(string defaultLabel)
 	{
 		var paintsByWeapon = new Dictionary<int, List<MenuItem>>();

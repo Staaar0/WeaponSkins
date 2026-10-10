@@ -65,6 +65,7 @@ public sealed class Events
 		pendingInventoryApplies.Clear();
 		spawnTicks.Clear();
 		plugin.Profile.DropAll();
+		plugin.GloveApply.Reset(finishHands: true);
 		registered = false;
 	}
 
@@ -145,13 +146,13 @@ public sealed class Events
 			return HookResult.Continue;
 
 		plugin.Applier.AdvanceLife(player.Slot);
-		plugin.Profile.ApplyAgent(player);
+		plugin.Profile.ResetAgent(player.Slot);
+		plugin.GloveApply.Drop(player.Slot);
+		plugin.Profile.ApplyAgent(player, applyGloves: true);
 		steamIdsBySlot[player.Slot] = player.SteamID;
 		spawnTicks[player.Slot] = Environment.TickCount64;
 		plugin.Profile.ApplyMusic(player);
 		plugin.Profile.ApplyPin(player);
-		plugin.GloveApply.Drop(player.Slot);
-		plugin.GloveApply.Apply(player, false);
 		var playerRef = PlayerRef.Capture(player);
 		if (playerRef is { } spawnRef)
 		{
@@ -162,19 +163,25 @@ public sealed class Events
 					plugin.Applier.SyncSpawnViewModel(current);
 			});
 		}
-
-		var spawnSlot = player.Slot;
-		var spawnSteamId = player.SteamID;
-		var spawnTeam = player.Team;
-		plugin.AddTimer(0.01f, () =>
+		else
 		{
-			var current = Utilities.GetPlayerFromSlot(spawnSlot);
-			if (current == null || !current.IsValid || current.IsBot ||
-				current.SteamID != spawnSteamId || current.Team != spawnTeam || !current.PawnIsAlive)
-				return;
+			var spawnSlot = player.Slot;
+			var spawnSteamId = player.SteamID;
+			var spawnTeam = player.Team;
+			var generation = worldGeneration;
+			plugin.AddTimer(0.01f, () =>
+			{
+				if (plugin.Stopping || generation != worldGeneration)
+					return;
 
-			plugin.Profile.ApplyAgent(current);
-		}, TimerFlags.STOP_ON_MAPCHANGE);
+				var current = Utilities.GetPlayerFromSlot(spawnSlot);
+				if (current == null || !current.IsValid || current.IsBot ||
+					current.SteamID != spawnSteamId || current.Team != spawnTeam || !current.PawnIsAlive)
+					return;
+
+				plugin.Profile.ApplyAgent(current, applyGloves: true);
+			}, TimerFlags.STOP_ON_MAPCHANGE);
+		}
 
 		return HookResult.Continue;
 	}
@@ -202,18 +209,16 @@ public sealed class Events
 				!current.PawnIsAlive || plugin.Cache.Get(current) == null)
 				return;
 
-			plugin.Profile.ApplyAgent(current);
 			plugin.GloveApply.Drop(current.Slot);
+			plugin.Profile.ApplyAgent(current, applyGloves: true);
 
 			if (Environment.TickCount64 - spawnTicks.GetValueOrDefault(slot) < SpawnTeamWindowMs)
 			{
-				plugin.GloveApply.Apply(current, false);
 				plugin.Applier.ApplyInventory(current);
 				return;
 			}
 
 			plugin.Applier.AdvanceLife(current.Slot);
-			plugin.GloveApply.Apply(current, true, refresh: false);
 			plugin.Applier.RefreshAll(current);
 		});
 
@@ -224,7 +229,11 @@ public sealed class Events
 	{
 		var victim = @event.Userid;
 		if (victim != null && victim.IsValid && !victim.IsBot)
+		{
 			plugin.Applier.AdvanceLife(victim.Slot);
+			plugin.Profile.ResetAgent(victim.Slot);
+			plugin.GloveApply.Drop(victim.Slot);
+		}
 
 		var attacker = @event.Attacker;
 		if (attacker == null || !attacker.IsValid || attacker.IsBot || attacker == @event.Userid)
@@ -237,26 +246,67 @@ public sealed class Events
 		if (loadout == null)
 			return HookResult.Continue;
 
-		var weapon = attacker.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
-		if (weapon == null || !weapon.IsValid)
+		var side = loadout.For(attacker.Team);
+		var active = attacker.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
+		var deathWeapon = NormalizeDeathWeapon(@event.Weapon);
+		int def;
+		if (KnifeService.IsKnifeClass(deathWeapon))
+		{
+			def = active is { IsValid: true } && KnifeService.IsKnifeClass(active.DesignerName)
+				? active.AttributeManager.Item.ItemDefinitionIndex
+				: side.Knife > 0 ? side.Knife : KnifeService.DefaultDef(attacker.Team);
+		}
+		else
+		{
+			def = plugin.Catalog.WeaponClasses.FirstOrDefault(pair =>
+				string.Equals(NormalizeDeathWeapon(pair.Value), deathWeapon, StringComparison.Ordinal)).Key;
+		}
+
+		if (def == 0)
 			return HookResult.Continue;
 
-		var def = (int)weapon.AttributeManager.Item.ItemDefinitionIndex;
-		var side = loadout.For(attacker.Team);
 		if (!side.Weapons.TryGetValue(def, out var entry) || entry.StatTrak < 0)
 			return HookResult.Continue;
 
-		entry.StatTrak++;
-		weapon.FallbackStatTrak = entry.StatTrak;
-
-		var item = weapon.AttributeManager.Item;
-		var statTrak = EconAttributes.AsFloat(entry.StatTrak);
-		EconAttributes.Set(item.NetworkedDynamicAttributes, "kill eater", statTrak);
-		EconAttributes.Set(item.AttributeList, "kill eater", statTrak);
-		Utilities.SetStateChanged(weapon, "CEconEntity", "m_nFallbackStatTrak");
-
+		if (entry.StatTrak < int.MaxValue)
+			entry.StatTrak++;
 		plugin.Store.MarkStatTrak(attacker.SteamID, attacker.Team, def, entry.Paint, entry.StatTrak);
+
+		var weapons = attacker.PlayerPawn.Value?.WeaponServices?.MyWeapons;
+		if (weapons != null)
+		{
+			foreach (var handle in weapons)
+			{
+				var weapon = handle.Value;
+				if (weapon == null || !weapon.IsValid || weapon.AttributeManager.Item.ItemDefinitionIndex != def)
+					continue;
+
+				weapon.FallbackStatTrak = entry.StatTrak;
+				var item = weapon.AttributeManager.Item;
+				var statTrak = EconAttributes.AsFloat(entry.StatTrak);
+				EconAttributes.Set(item.NetworkedDynamicAttributes, "kill eater", statTrak);
+				EconAttributes.Set(item.AttributeList, "kill eater", statTrak);
+				Utilities.SetStateChanged(weapon, "CEconEntity", "m_nFallbackStatTrak");
+			}
+		}
+
 		return HookResult.Continue;
+	}
+
+	private static string NormalizeDeathWeapon(string? name)
+	{
+		if (string.IsNullOrEmpty(name))
+			return "";
+
+		if (name.StartsWith("weapon_", StringComparison.Ordinal))
+			name = name[7..];
+
+		return name switch
+		{
+			"m4a1_silencer_off" => "m4a1_silencer",
+			"usp_silencer_off" => "usp_silencer",
+			_ => name
+		};
 	}
 
 	private HookResult OnItemPickup(EventItemPickup @event, GameEventInfo info)
@@ -331,9 +381,7 @@ public sealed class Events
 		return HookResult.Continue;
 	}
 
-	// CounterStrikeSharp also calls OnClientDisconnect for every player when the
-	// map changes, and they reconnect a few seconds later. Only per-slot state is
-	// cleared here; the cached loadout survives until OnPlayerDisconnect.
+	// Map changes disconnect client slots too. Keep the cached loadout.
 	private void OnClientDisconnect(int slot)
 	{
 		steamIdsBySlot.Remove(slot, out var steamId);
@@ -353,11 +401,11 @@ public sealed class Events
 		plugin.Menu.Drop(slot);
 		plugin.Profile.Drop(slot);
 		plugin.Applier.Drop(slot);
-		plugin.GloveApply.Drop(slot);
+		plugin.GloveApply.Forget(slot);
 		plugin.Menus.Drop(slot);
 	}
 
-	// player_disconnect only fires when a player really leaves, not on map change.
+	// Clear the loadout when the player leaves the server.
 	private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
 	{
 		var player = @event.Userid;
@@ -384,17 +432,20 @@ public sealed class Events
 		pendingInventoryApplies.Clear();
 		spawnTicks.Clear();
 		plugin.Profile.DropAll();
+		plugin.GloveApply.Reset();
 
 		if (plugin.Catalog.Loaded)
 			return;
 
+		var cancellationToken = plugin.LifetimeToken;
 		Task.Run(async () =>
 		{
 			try
 			{
-				await plugin.Catalog.LoadAsync(plugin.Config.Api, plugin.Db.Configured);
-				if (plugin.Catalog.Loaded)
-					plugin.Menus.Prewarm();
+				await plugin.Catalog.LoadAsync(plugin.Config.Api, plugin.Db.Configured, cancellationToken);
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
 			}
 			catch (Exception ex)
 			{
@@ -438,9 +489,8 @@ public sealed class Events
 		if (!player.PawnIsAlive)
 			return;
 
-		plugin.Profile.ApplyAgent(player);
+		plugin.Profile.ApplyAgent(player, applyGloves: true);
 		plugin.Applier.BumpAllRenderWear(player);
-		plugin.GloveApply.Apply(player, true, refresh: false);
 		plugin.Applier.RefreshAll(player);
 	}
 }

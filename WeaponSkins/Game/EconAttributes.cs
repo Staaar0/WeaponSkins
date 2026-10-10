@@ -37,7 +37,7 @@ public static class EconAttributes
 		return BitConverter.Int32BitsToSingle(value);
 	}
 
-	public static void MarkCustom(CEconItemView item, ulong steamId)
+	public static void AssignItemId(CEconItemView item)
 	{
 		if (item.Handle == IntPtr.Zero)
 			return;
@@ -46,6 +46,14 @@ public static class EconAttributes
 		item.ItemID = itemId;
 		item.ItemIDLow = (uint)(itemId & 0xFFFFFFFF);
 		item.ItemIDHigh = (uint)(itemId >> 32);
+	}
+
+	public static void MarkCustom(CEconItemView item, ulong steamId)
+	{
+		if (item.Handle == IntPtr.Zero)
+			return;
+
+		AssignItemId(item);
 		item.AccountID = (uint)(steamId & 0xFFFFFFFF);
 	}
 }

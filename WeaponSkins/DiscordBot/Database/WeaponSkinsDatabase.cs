@@ -16,20 +16,77 @@ public sealed class WeaponSkinsDatabase
 	private readonly CancellationToken cancellationToken;
     private readonly Action<ulong>? loadoutChanged;
     private readonly Func<ulong, CancellationToken, Task<Permissions>>? livePermissions;
+    private readonly global::WeaponSkins.LoadoutStore? mutationStore;
 
 	public WeaponSkinsDatabase(global::WeaponSkins.Database database, Action<ulong>? loadoutChanged = null,
-        CancellationToken cancellationToken = default, Func<ulong, CancellationToken, Task<Permissions>>? livePermissions = null)
+        CancellationToken cancellationToken = default, Func<ulong, CancellationToken, Task<Permissions>>? livePermissions = null,
+        global::WeaponSkins.LoadoutStore? mutationStore = null)
 	{
 		this.database = database;
         this.loadoutChanged = loadoutChanged;
         this.cancellationToken = cancellationToken;
         this.livePermissions = livePermissions;
+        this.mutationStore = mutationStore;
 	}
+
+    private async Task MutateAsync(ulong steamId, Func<Task> operation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (mutationStore == null)
+            await operation();
+        else
+            await mutationStore.RunMutationAsync(steamId, operation, cancellationToken);
+    }
+
+    private async Task<T> MutateAsync<T>(ulong steamId, Func<Task<T>> operation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (mutationStore == null)
+            return await operation();
+
+        T result = default!;
+        await mutationStore.RunMutationAsync(steamId, async () => { result = await operation(); }, cancellationToken);
+        return result;
+    }
+
+    private static void RequireFinite(float value, string name)
+    {
+        if (!float.IsFinite(value))
+            throw new InvalidOperationException($"{name} must be a finite number.");
+    }
+
+    private static void ValidatePaint(PaintDef? paint)
+    {
+        if (paint == null) return;
+        RequireFinite(paint.MinFloat, "Minimum wear");
+        RequireFinite(paint.MaxFloat, "Maximum wear");
+        if (paint.MinFloat < 0f || paint.MaxFloat > 1f || paint.MinFloat > paint.MaxFloat)
+            throw new InvalidOperationException("The selected finish has an invalid wear range.");
+    }
+
+    private static void ValidateGeneratedNumbers(SharedEconPreview item)
+    {
+        RequireFinite(item.PaintWear, "Wear");
+        foreach (var decoration in item.Stickers.Concat(item.Keychains))
+        {
+            RequireFinite(decoration.Wear, "Sticker wear");
+            RequireFinite(decoration.Scale, "Sticker scale");
+            RequireFinite(decoration.Rotation, "Sticker rotation");
+            RequireFinite(decoration.OffsetX, "Decoration X offset");
+            RequireFinite(decoration.OffsetY, "Decoration Y offset");
+            RequireFinite(decoration.OffsetZ, "Decoration Z offset");
+        }
+    }
 
     private void NotifyLoadoutChanged(ulong steamId)
     {
-        // Notification failure must never turn an already-committed save into a reported SQL failure.
-        try { loadoutChanged?.Invoke(steamId); } catch { /* The durable sync row is polled as a fallback. */ }
+        // The save has committed; a notification error must not report it as failed.
+        try { loadoutChanged?.Invoke(steamId); } catch { /* The sync poll will pick up the saved change. */ }
+    }
+
+    private void RetireCounter(ulong steamId, int team, int defIndex, int paint)
+    {
+        mutationStore?.ResetStatTrak(steamId, (CounterStrikeSharp.API.Modules.Utils.CsTeam)team, defIndex, paint);
     }
 
     private async Task<MySqlConnection> OpenAsync()
@@ -139,8 +196,7 @@ public sealed class WeaponSkinsDatabase
     {
         await using var connection = await OpenAsync();
         await using var command = connection.CreateCommand();
-        // One indexed lookup of this account's equipped items, without the other loadout tables.
-        // The left join also returns linked accounts that have no custom weapons.
+        // Fetch equipped weapons in one query, including accounts with no custom weapons.
         command.CommandText = """
             SELECT l.steamid, e.defindex
             FROM ws_links l
@@ -164,8 +220,12 @@ public sealed class WeaponSkinsDatabase
         return new OwnedWeapons(steamId, defs.ToArray());
     }
 
-    public async Task SetSkinAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint, bool knife)
+    public Task SetSkinAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint, bool knife)
+        => MutateAsync(steamId, () => SetSkinCoreAsync(steamId, target, defIndex, paint, knife));
+
+    private async Task SetSkinCoreAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint, bool knife)
     {
+        ValidatePaint(paint);
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
@@ -191,12 +251,8 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    /// <summary>
-    /// Writes a whole build in one go: skin, pattern, wear, StatTrak and stickers.
-    /// One transaction and one sync row, so the player sees the finished weapon
-    /// in game instead of it changing under them step by step.
-    /// </summary>
-    public async Task ApplyBuildAsync(
+    // Saves the full build in one transaction and requests one game refresh.
+    public Task ApplyBuildAsync(
         ulong steamId,
         TeamTarget target,
         int defIndex,
@@ -208,7 +264,23 @@ public sealed class WeaponSkinsDatabase
         IReadOnlyDictionary<int, int>? stickers,
         bool clearStickers = false,
         string? nameTag = null)
+        => MutateAsync(steamId, () => ApplyBuildCoreAsync(steamId, target, defIndex, paint, kind, seed, wear, statTrak, stickers, clearStickers, nameTag));
+
+    private async Task ApplyBuildCoreAsync(
+        ulong steamId,
+        TeamTarget target,
+        int defIndex,
+        PaintDef? paint,
+        ItemKind kind,
+        int seed,
+        float? wear,
+        bool statTrak,
+        IReadOnlyDictionary<int, int>? stickers,
+        bool clearStickers,
+        string? nameTag)
     {
+        ValidatePaint(paint);
+        if (wear.HasValue) RequireFinite(wear.Value, "Wear");
         var paintId = paint?.Paint ?? 0;
         var floor = kind == ItemKind.Knife ? 0.01f : 0.000001f;
         if (paint != null)
@@ -250,6 +322,9 @@ public sealed class WeaponSkinsDatabase
 
             await QueueSync(connection, transaction, steamId);
             await transaction.CommitAsync(cancellationToken);
+            if (!statTrak)
+                foreach (var team in target.Teams())
+                    RetireCounter(steamId, team, defIndex, paintId);
             NotifyLoadoutChanged(steamId);
         }
         catch
@@ -263,8 +338,7 @@ public sealed class WeaponSkinsDatabase
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        // A null tag preserves the existing name; an empty tag explicitly clears it.
-        // Enabling StatTrak keeps an existing count instead of resetting it.
+        // A null tag keeps the name; an empty tag clears it. Enabling StatTrak keeps its count.
         command.CommandText = statTrak
             ? "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, @seed, @tag, 0) ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, nametag = IF(@set_tag, @tag, nametag), stattrak = CASE WHEN stattrak < 0 THEN 0 ELSE stattrak END;"
             : "INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak) VALUES (@sid, @team, @def, @paint, @wear, @seed, @tag, -1) ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, nametag = IF(@set_tag, @tag, nametag), stattrak = -1;";
@@ -276,11 +350,7 @@ public sealed class WeaponSkinsDatabase
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    /// <summary>
-    /// Wipes every sticker slot and the charm, the same as "Remove all" in game.
-    /// This is the only place the bot touches slots a gen code filled, a normal
-    /// sticker change leaves them alone and lets the plugin sort them out.
-    /// </summary>
+    // Removes all stickers, including gen-code slots, and the charm.
     private async Task ClearStickersAndCharm(MySqlConnection connection, MySqlTransaction transaction, ulong steamId, int team, int defIndex, int paint)
     {
         await using (var stickers = connection.CreateCommand())
@@ -319,7 +389,10 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    public async Task ResetKnifeAsync(ulong steamId, TeamTarget target)
+    public Task ResetKnifeAsync(ulong steamId, TeamTarget target)
+        => MutateAsync(steamId, () => ResetKnifeCoreAsync(steamId, target));
+
+    private async Task ResetKnifeCoreAsync(ulong steamId, TeamTarget target)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -330,8 +403,12 @@ public sealed class WeaponSkinsDatabase
         NotifyLoadoutChanged(steamId);
     }
 
-    public async Task SetGlovesAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint)
+    public Task SetGlovesAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint)
+        => MutateAsync(steamId, () => SetGlovesCoreAsync(steamId, target, defIndex, paint));
+
+    private async Task SetGlovesCoreAsync(ulong steamId, TeamTarget target, int defIndex, PaintDef? paint)
     {
+        ValidatePaint(paint);
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
@@ -372,7 +449,10 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    public async Task SetAgentAsync(ulong steamId, int team, AgentDef? agent)
+    public Task SetAgentAsync(ulong steamId, int team, AgentDef? agent)
+        => MutateAsync(steamId, () => SetAgentCoreAsync(steamId, team, agent));
+
+    private async Task SetAgentCoreAsync(ulong steamId, int team, AgentDef? agent)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -400,7 +480,10 @@ public sealed class WeaponSkinsDatabase
         NotifyLoadoutChanged(steamId);
     }
 
-    public async Task SetMusicAsync(ulong steamId, int kit)
+    public Task SetMusicAsync(ulong steamId, int kit)
+        => MutateAsync(steamId, () => SetMusicCoreAsync(steamId, kit));
+
+    private async Task SetMusicCoreAsync(ulong steamId, int kit)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -420,7 +503,10 @@ public sealed class WeaponSkinsDatabase
         NotifyLoadoutChanged(steamId);
     }
 
-    public async Task SetPinAsync(ulong steamId, int pin)
+    public Task SetPinAsync(ulong steamId, int pin)
+        => MutateAsync(steamId, () => SetPinCoreAsync(steamId, pin));
+
+    private async Task SetPinCoreAsync(ulong steamId, int pin)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -440,11 +526,16 @@ public sealed class WeaponSkinsDatabase
         NotifyLoadoutChanged(steamId);
     }
 
-    public async Task<bool> SetWearAsync(ulong steamId, TeamTarget target, int defIndex, float wear, CatalogService catalog)
+    public Task<bool> SetWearAsync(ulong steamId, TeamTarget target, int defIndex, float wear, CatalogService catalog)
+        => MutateAsync(steamId, () => SetWearCoreAsync(steamId, target, defIndex, wear, catalog));
+
+    private async Task<bool> SetWearCoreAsync(ulong steamId, TeamTarget target, int defIndex, float wear, CatalogService catalog)
     {
+        RequireFinite(wear, "Wear");
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
             var def = catalog.FindPaint(defIndex, paint);
+            ValidatePaint(def);
             var knife = defIndex is 42 or 59 || catalog.Knives.Any(x => x.DefIndex == defIndex);
             var minimum = def == null ? (knife ? 0.01f : 0.000001f) : MinimumWear(defIndex, def, knife);
             var maximum = def?.MaxFloat ?? 1f;
@@ -458,7 +549,10 @@ public sealed class WeaponSkinsDatabase
         });
     }
 
-    public async Task<bool> SetSeedAsync(ulong steamId, TeamTarget target, int defIndex, int seed)
+    public Task<bool> SetSeedAsync(ulong steamId, TeamTarget target, int defIndex, int seed)
+        => MutateAsync(steamId, () => SetSeedCoreAsync(steamId, target, defIndex, seed));
+
+    private async Task<bool> SetSeedCoreAsync(ulong steamId, TeamTarget target, int defIndex, int seed)
     {
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
@@ -471,7 +565,10 @@ public sealed class WeaponSkinsDatabase
         });
     }
 
-    public async Task<bool> SetNameTagAsync(ulong steamId, TeamTarget target, int defIndex, string? tag)
+    public Task<bool> SetNameTagAsync(ulong steamId, TeamTarget target, int defIndex, string? tag)
+        => MutateAsync(steamId, () => SetNameTagCoreAsync(steamId, target, defIndex, tag));
+
+    private async Task<bool> SetNameTagCoreAsync(ulong steamId, TeamTarget target, int defIndex, string? tag)
     {
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
@@ -484,7 +581,10 @@ public sealed class WeaponSkinsDatabase
         });
     }
 
-    public async Task<bool> SetStatTrakAsync(ulong steamId, TeamTarget target, int defIndex, bool enabled)
+    public Task<bool> SetStatTrakAsync(ulong steamId, TeamTarget target, int defIndex, bool enabled)
+        => MutateAsync(steamId, () => SetStatTrakCoreAsync(steamId, target, defIndex, enabled));
+
+    private async Task<bool> SetStatTrakCoreAsync(ulong steamId, TeamTarget target, int defIndex, bool enabled)
     {
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
@@ -495,14 +595,10 @@ public sealed class WeaponSkinsDatabase
                 : "UPDATE ws_weapons SET stattrak = -1 WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
             AddWeaponKey(command, steamId, team, defIndex, paint);
             await command.ExecuteNonQueryAsync(cancellationToken);
-        });
+        }, resetCounters: !enabled);
     }
 
-    /// <summary>
-    /// Sticker slots this bot and the in-game menu both manage: 1-4, indexes 0-3. A gen
-    /// code can fill a fifth, which neither can show or clear, so any sticker edit drops
-    /// it - the same rule the plugin's own sticker menu applies.
-    /// </summary>
+    // Uses slots 1-4. Sticker edits remove the fifth gen-code slot, like the game menu.
     public const int ManagedStickerSlots = 4;
 
     public Task<bool> SetStickerAsync(ulong steamId, TeamTarget target, int defIndex, int slot, StickerDef? sticker)
@@ -510,11 +606,11 @@ public sealed class WeaponSkinsDatabase
         return SetStickersAsync(steamId, target, defIndex, [slot], sticker);
     }
 
-    /// <summary>
-    /// Writes every named slot in one transaction, so filling all four queues a single
-    /// sync row and the player's weapon redraws once instead of once per slot.
-    /// </summary>
-    public async Task<bool> SetStickersAsync(ulong steamId, TeamTarget target, int defIndex, IReadOnlyList<int> slots, StickerDef? sticker)
+    // Saves all selected slots together and requests one game refresh.
+    public Task<bool> SetStickersAsync(ulong steamId, TeamTarget target, int defIndex, IReadOnlyList<int> slots, StickerDef? sticker)
+        => MutateAsync(steamId, () => SetStickersCoreAsync(steamId, target, defIndex, slots, sticker));
+
+    private async Task<bool> SetStickersCoreAsync(ulong steamId, TeamTarget target, int defIndex, IReadOnlyList<int> slots, StickerDef? sticker)
     {
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
@@ -592,8 +688,11 @@ public sealed class WeaponSkinsDatabase
         return result;
     }
 
-    /// <summary>Clears every sticker and the charm on the equipped skin.</summary>
-    public async Task<bool> ClearStickersAsync(ulong steamId, TeamTarget target, int defIndex)
+    // Clears stickers and the charm from the equipped skin.
+    public Task<bool> ClearStickersAsync(ulong steamId, TeamTarget target, int defIndex)
+        => MutateAsync(steamId, () => ClearStickersCoreAsync(steamId, target, defIndex));
+
+    private async Task<bool> ClearStickersCoreAsync(ulong steamId, TeamTarget target, int defIndex)
     {
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
             await ClearStickersAndCharm(connection, transaction, steamId, team, defIndex, paint));
@@ -609,16 +708,13 @@ public sealed class WeaponSkinsDatabase
             row(reader);
     }
 
-    /// <summary>What the plugin says a player may do. Both true on an older plugin.</summary>
+    // Player permissions. Older plugins allow both features.
     public readonly record struct Permissions(bool Stickers, bool Gen);
 
-    /// <summary>
-    /// The built-in bot checks the plugin's live permissions on the game thread.
-    /// Database snapshots remain a fallback for callers without a live provider.
-    /// </summary>
+    // Checks live game permissions, or the database snapshot if no provider is available.
     public async Task<Permissions> PermissionsAsync(ulong steamId)
     {
-        // Do not cache VIP decisions or fall back to stale grants if the live check fails.
+        // Use current VIP permissions. A failed check must not grant access.
         if (livePermissions != null)
             return await livePermissions(steamId, cancellationToken);
 
@@ -637,13 +733,17 @@ public sealed class WeaponSkinsDatabase
         }
         catch (MySqlException ex) when ((int)ex.ErrorCode is TableMissing or ColumnMissing)
         {
-            // An older plugin, so there is nothing to go on. Restrict nothing.
+            // Older plugins have no permission snapshot.
             return new Permissions(true, true);
         }
     }
 
-    public async Task<string> ApplyGenAsync(ulong steamId, TeamTarget target, SharedEconPreview item, CatalogService catalog, bool allowStickers = true)
+    public Task<string> ApplyGenAsync(ulong steamId, TeamTarget target, SharedEconPreview item, CatalogService catalog, bool allowStickers = true)
+        => MutateAsync(steamId, () => ApplyGenCoreAsync(steamId, target, item, catalog, allowStickers));
+
+    private async Task<string> ApplyGenCoreAsync(ulong steamId, TeamTarget target, SharedEconPreview item, CatalogService catalog, bool allowStickers)
     {
+        ValidateGeneratedNumbers(item);
         var isKnife = catalog.Knives.Any(value => value.DefIndex == item.DefIndex);
         var isGlove = catalog.Gloves.Any(value => value.DefIndex == item.DefIndex);
         var isWeapon = catalog.Paints.ContainsKey(item.DefIndex);
@@ -651,6 +751,7 @@ public sealed class WeaponSkinsDatabase
             throw new InvalidOperationException("Unknown item in inspect code.");
 
         var paintDef = catalog.FindPaint(item.DefIndex, item.PaintIndex);
+        ValidatePaint(paintDef);
         var minimum = isKnife ? 0.01f : 0.000001f;
         if (paintDef != null)
             minimum = Math.Max(minimum, paintDef.MinFloat);
@@ -688,8 +789,7 @@ public sealed class WeaponSkinsDatabase
                 }
                 else if (!isGlove)
                 {
-                    // Without the sticker permission the code still applies, it
-                    // just arrives bare, exactly like the in-game command.
+                    // Apply the gen code without stickers if the player lacks sticker access.
                     if (allowStickers)
                     {
                         await WriteGeneratedStickers(connection, transaction, steamId, team, item.DefIndex, item.PaintIndex, item.Stickers);
@@ -704,6 +804,8 @@ public sealed class WeaponSkinsDatabase
 
             await QueueSync(connection, transaction, steamId);
             await transaction.CommitAsync(cancellationToken);
+            foreach (var team in target.Teams())
+                RetireCounter(steamId, team, item.DefIndex, item.PaintIndex);
             NotifyLoadoutChanged(steamId);
             return paintDef?.Name ?? catalog.WeaponName(item.DefIndex);
         }
@@ -714,11 +816,12 @@ public sealed class WeaponSkinsDatabase
         }
     }
 
-    private async Task<bool> UpdateActiveWeapons(ulong steamId, TeamTarget target, int defIndex, Func<MySqlConnection, MySqlTransaction, int, int, Task> action)
+    private async Task<bool> UpdateActiveWeapons(ulong steamId, TeamTarget target, int defIndex, Func<MySqlConnection, MySqlTransaction, int, int, Task> action, bool resetCounters = false)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var changed = false;
+        List<(int Team, int Paint)>? counterResets = resetCounters ? [] : null;
         try
         {
             foreach (var team in target.Teams())
@@ -727,11 +830,15 @@ public sealed class WeaponSkinsDatabase
                 if (!paint.HasValue || paint.Value <= 0)
                     continue;
                 await action(connection, transaction, team, paint.Value);
+                counterResets?.Add((team, paint.Value));
                 changed = true;
             }
             if (changed)
                 await QueueSync(connection, transaction, steamId);
             await transaction.CommitAsync(cancellationToken);
+            if (counterResets != null)
+                foreach (var (team, paint) in counterResets)
+                    RetireCounter(steamId, team, defIndex, paint);
             if (changed) NotifyLoadoutChanged(steamId);
             return changed;
         }

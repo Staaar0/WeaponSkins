@@ -9,8 +9,20 @@ public sealed class LoadoutStore
 	private readonly record struct StickerSnapshot(int Slot, int Id, float Wear, float Scale, float Rotation, float OffsetX, float OffsetY, int Schema);
 	private readonly record struct CharmSnapshot(int Id, int Pattern, int Sticker, int Highlight, float OffsetX, float OffsetY, float OffsetZ);
 	private readonly record struct StatTrakKey(ulong SteamId, CsTeam Team, int DefIndex, int Paint);
-	private readonly record struct StatTrakWrite(CsTeam Team, int DefIndex, int Paint, int Count);
-	private readonly record struct WriteKey(ulong SteamId, CsTeam Team, int DefIndex, WriteKind Kind);
+	private readonly record struct CounterValue(int Count, long Version, long Epoch);
+	private readonly record struct StatTrakWrite(CsTeam Team, int DefIndex, int Paint, CounterValue Value);
+	private readonly record struct WriteKey(ulong SteamId, CsTeam Team, int DefIndex, WriteKind Kind, int Paint = 0, WeaponFields Fields = WeaponFields.None);
+
+	[Flags]
+	public enum WeaponFields
+	{
+		None = 0,
+		Wear = 1,
+		Seed = 2,
+		NameTag = 4,
+		StatTrak = 8,
+		All = Wear | Seed | NameTag | StatTrak
+	}
 
 	private enum WriteKind
 	{
@@ -35,6 +47,14 @@ public sealed class LoadoutStore
 		public long Version;
 	}
 
+	private sealed class QueuedWrite(ulong steamId)
+	{
+		public readonly ulong SteamId = steamId;
+		public readonly TaskCompletionSource Admission = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		public bool Admitted;
+		public LinkedListNode<QueuedWrite>? Waiting;
+	}
+
 	private const int MaxPendingWrites = 1024;
 	private const int MaxPendingWritesPerPlayer = 64;
 
@@ -43,11 +63,20 @@ public sealed class LoadoutStore
 	private readonly Dictionary<ulong, Task> writeTails = [];
 	private readonly Dictionary<ulong, int> pendingByPlayer = [];
 	private readonly Dictionary<WriteKey, CoalescedWrite> coalescedWrites = [];
-	private readonly Dictionary<StatTrakKey, int> pendingStatTrak = [];
+	private readonly Dictionary<StatTrakKey, CounterValue> pendingStatTrak = [];
+	private readonly Dictionary<StatTrakKey, CounterValue> scheduledStatTrak = [];
+	private readonly Dictionary<StatTrakKey, long> persistedCounterVersions = [];
+	private readonly Dictionary<StatTrakKey, long> counterEpochs = [];
 	private readonly Dictionary<ulong, Task> statTrakFlushes = [];
+	private readonly LinkedList<QueuedWrite> admissionWaiters = [];
 	private readonly SemaphoreSlim writeSlots = new(8, 8);
+	private readonly CancellationTokenSource writeCancellation = new();
+	private long counterVersion;
 	private int pendingWrites;
 	private bool acceptingWrites = true;
+	private Task drainCompletion = Task.CompletedTask;
+	public event Action<Exception>? WriteFailed;
+	public Task DrainCompletion { get { lock (writeSync) return drainCompletion; } }
 
 	public LoadoutStore(Database database)
 	{
@@ -56,21 +85,27 @@ public sealed class LoadoutStore
 
 	private static TeamLoadout Side(PlayerLoadout loadout, sbyte team) => team == 3 ? loadout.CT : loadout.T;
 
-    private static string NormalizeAgentModel(string model)
-    {
-        string path=model.Trim();
-        foreach(string prefix in new[]{"characters/models/","agents/models/"})
-            if(path.StartsWith(prefix,StringComparison.Ordinal))path=path[prefix.Length..];
-        if(path.EndsWith(".vmdl",StringComparison.Ordinal))path=path[..^5];
-        if(path.Length==0 || path.Contains("..") || path.Contains('\\') || path.StartsWith('/'))return "";
-        return "agents/models/"+path+".vmdl";
-    }
+	private static string NormalizeAgentModel(string model)
+	{
+		var path = model.Trim();
+		foreach (var prefix in new[] { "characters/models/", "agents/models/" })
+			if (path.StartsWith(prefix, StringComparison.Ordinal))
+				path = path[prefix.Length..];
+		if (path.EndsWith(".vmdl", StringComparison.Ordinal))
+			path = path[..^5];
+		if (path.Length == 0 || path.Contains("..") || path.Contains('\\') || path.StartsWith('/'))
+			return "";
+		return "agents/models/" + path + ".vmdl";
+	}
 
 	public async Task<PlayerLoadout> Load(ulong steamId, CancellationToken cancellationToken = default)
 	{
 		var loadout = new PlayerLoadout();
 		if (!database.Configured)
 			return loadout;
+
+		// Flush again to include kills earned during the earlier sync save.
+		await FlushStatTrak(steamId, cancellationToken);
 
 		Task? pending;
 		lock (writeSync)
@@ -177,24 +212,25 @@ public sealed class LoadoutStore
 		return loadout;
 	}
 
-	public Task SaveWeapon(ulong steamId, CsTeam team, int defIndex, WeaponEntry entry)
+	public Task SaveWeapon(ulong steamId, CsTeam team, int defIndex, WeaponEntry entry, WeaponFields fields = WeaponFields.All)
 	{
 		var weapon = Snapshot(entry);
-		ForgetStatTrak(steamId, team, defIndex, weapon.Paint);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.Weapon), async () =>
+		var resetVersion = CaptureCounterVersion();
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.Weapon, weapon.Paint, fields), async () =>
 		{
-			await using var connection = await database.Open();
-			await WriteWeapon(connection, null, steamId, team, defIndex, weapon);
+			await using var connection = await database.Open(writeCancellation.Token);
+			await WriteWeapon(connection, null, steamId, team, defIndex, weapon, fields);
+			if ((fields & WeaponFields.StatTrak) != 0)
+				ResetStatTrak(steamId, team, defIndex, weapon.Paint, resetVersion);
 		});
 	}
 
 	public Task SaveWeaponAndEquip(ulong steamId, CsTeam team, int defIndex, WeaponEntry entry)
 	{
 		var weapon = Snapshot(entry);
-		ForgetStatTrak(steamId, team, defIndex, weapon.Paint);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.WeaponAndEquip), () => Transaction(async (connection, transaction) =>
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.WeaponAndEquip, weapon.Paint), () => Transaction(async (connection, transaction) =>
 		{
-			await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
+			await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon, WeaponFields.None);
 			await WriteEquipped(connection, transaction, steamId, team, defIndex, weapon.Paint);
 		}));
 	}
@@ -203,10 +239,9 @@ public sealed class LoadoutStore
 	{
 		var weapon = Snapshot(entry);
 		var stickers = Snapshot(entry.Stickers);
-		ForgetStatTrak(steamId, team, defIndex, weapon.Paint);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.WeaponAndStickers), () => Transaction(async (connection, transaction) =>
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.WeaponAndStickers, weapon.Paint), () => Transaction(async (connection, transaction) =>
 		{
-			await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
+			await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon, WeaponFields.None);
 			await WriteStickers(connection, transaction, steamId, team, defIndex, weapon.Paint, stickers);
 		}));
 	}
@@ -214,7 +249,7 @@ public sealed class LoadoutStore
 	public Task SaveStickers(ulong steamId, CsTeam team, int defIndex, int paint, List<StickerEntry> stickers)
 	{
 		var snapshot = Snapshot(stickers);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.Stickers), () => Transaction((connection, transaction) =>
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.Stickers, paint), () => Transaction((connection, transaction) =>
 			WriteStickers(connection, transaction, steamId, team, defIndex, paint, snapshot)));
 	}
 
@@ -222,7 +257,7 @@ public sealed class LoadoutStore
 	{
 		var stickerSnapshot = Snapshot(stickers);
 		var charmSnapshot = Snapshot(charm);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.StickersAndCharm), () => Transaction(async (connection, transaction) =>
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.StickersAndCharm, paint), () => Transaction(async (connection, transaction) =>
 		{
 			await WriteStickers(connection, transaction, steamId, team, defIndex, paint, stickerSnapshot);
 			await WriteCharm(connection, transaction, steamId, team, defIndex, paint, charmSnapshot);
@@ -234,14 +269,18 @@ public sealed class LoadoutStore
 		var weapon = Snapshot(entry);
 		var stickers = Snapshot(entry.Stickers);
 		var charm = Snapshot(entry.Charm);
-		ForgetStatTrak(steamId, team, defIndex, weapon.Paint);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.GeneratedWeapon), () => Transaction(async (connection, transaction) =>
+		var resetVersion = CaptureCounterVersion();
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.GeneratedWeapon, weapon.Paint), async () =>
 		{
-			await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
-			await WriteEquipped(connection, transaction, steamId, team, defIndex, weapon.Paint);
-			await WriteStickers(connection, transaction, steamId, team, defIndex, weapon.Paint, stickers);
-			await WriteCharm(connection, transaction, steamId, team, defIndex, weapon.Paint, charm);
-		}));
+			await Transaction(async (connection, transaction) =>
+			{
+				await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
+				await WriteEquipped(connection, transaction, steamId, team, defIndex, weapon.Paint);
+				await WriteStickers(connection, transaction, steamId, team, defIndex, weapon.Paint, stickers);
+				await WriteCharm(connection, transaction, steamId, team, defIndex, weapon.Paint, charm);
+			});
+			ResetStatTrak(steamId, team, defIndex, weapon.Paint, resetVersion);
+		});
 	}
 
 	public Task SaveGeneratedKnife(ulong steamId, CsTeam team, int defIndex, WeaponEntry entry)
@@ -249,15 +288,19 @@ public sealed class LoadoutStore
 		var weapon = Snapshot(entry);
 		var stickers = Snapshot(entry.Stickers);
 		var charm = Snapshot(entry.Charm);
-		ForgetStatTrak(steamId, team, defIndex, weapon.Paint);
-		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.GeneratedKnife), () => Transaction(async (connection, transaction) =>
+		var resetVersion = CaptureCounterVersion();
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.GeneratedKnife, weapon.Paint), async () =>
 		{
-			await WriteKnife(connection, transaction, steamId, team, defIndex);
-			await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
-			await WriteEquipped(connection, transaction, steamId, team, defIndex, weapon.Paint);
-			await WriteStickers(connection, transaction, steamId, team, defIndex, weapon.Paint, stickers);
-			await WriteCharm(connection, transaction, steamId, team, defIndex, weapon.Paint, charm);
-		}));
+			await Transaction(async (connection, transaction) =>
+			{
+				await WriteKnife(connection, transaction, steamId, team, defIndex);
+				await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
+				await WriteEquipped(connection, transaction, steamId, team, defIndex, weapon.Paint);
+				await WriteStickers(connection, transaction, steamId, team, defIndex, weapon.Paint, stickers);
+				await WriteCharm(connection, transaction, steamId, team, defIndex, weapon.Paint, charm);
+			});
+			ResetStatTrak(steamId, team, defIndex, weapon.Paint, resetVersion);
+		});
 	}
 
 	public void MarkStatTrak(ulong steamId, CsTeam team, int defIndex, int paint, int count)
@@ -268,11 +311,44 @@ public sealed class LoadoutStore
 		lock (writeSync)
 		{
 			if (acceptingWrites)
-				pendingStatTrak[new StatTrakKey(steamId, team, defIndex, paint)] = count;
+			{
+				var key = new StatTrakKey(steamId, team, defIndex, paint);
+				pendingStatTrak[key] = new CounterValue(Math.Max(count, 0), ++counterVersion, counterEpochs.GetValueOrDefault(key));
+			}
 		}
 	}
 
-	public Task FlushStatTrak(ulong? steamId = null)
+	public Task FlushStatTrak(ulong? steamId = null, CancellationToken cancellationToken = default)
+	{
+		return FlushRequestedCounters(steamId, false, cancellationToken);
+	}
+
+	private async Task FlushRequestedCounters(ulong? steamId, bool internalWrite, CancellationToken cancellationToken)
+	{
+		Dictionary<StatTrakKey, long> requested;
+		Task batch;
+		lock (writeSync)
+		{
+			requested = pendingStatTrak.Where(entry => !steamId.HasValue || entry.Key.SteamId == steamId.Value)
+				.ToDictionary(entry => entry.Key, entry => entry.Value.Version);
+			batch = FlushStatTrakCore(steamId, internalWrite);
+		}
+		while (true)
+		{
+			await batch.WaitAsync(cancellationToken);
+			lock (writeSync)
+			{
+				if (!requested.Any(entry => pendingStatTrak.ContainsKey(entry.Key) &&
+					persistedCounterVersions.GetValueOrDefault(entry.Key) < entry.Value))
+					return;
+				// A reset changed the counter. Queue the pending count again.
+				batch = FlushStatTrakCore(steamId, internalWrite);
+			}
+			await Task.Yield();
+		}
+	}
+
+	private Task FlushStatTrakCore(ulong? steamId, bool internalWrite)
 	{
 		if (!database.Configured)
 			return Task.CompletedTask;
@@ -287,18 +363,21 @@ public sealed class LoadoutStore
 			}
 
 			var groups = pendingStatTrak
-				.Where(entry => (!steamId.HasValue || entry.Key.SteamId == steamId.Value) && !statTrakFlushes.ContainsKey(entry.Key.SteamId))
+				.Where(entry => (!steamId.HasValue || entry.Key.SteamId == steamId.Value) &&
+					(!scheduledStatTrak.TryGetValue(entry.Key, out var scheduled) || scheduled != entry.Value))
 				.GroupBy(entry => entry.Key.SteamId)
 				.Select(group => (SteamId: group.Key, Writes: group.Select(entry => new StatTrakWrite(entry.Key.Team, entry.Key.DefIndex, entry.Key.Paint, entry.Value)).ToArray()))
 				.ToArray();
 
 			foreach (var group in groups)
 			{
-				var task = Queue(group.SteamId, () => WriteStatTrakBatchSafe(group.SteamId, group.Writes));
+				foreach (var write in group.Writes)
+					scheduledStatTrak[new StatTrakKey(group.SteamId, write.Team, write.DefIndex, write.Paint)] = write.Value;
+				var task = Queue(group.SteamId, () => WriteStatTrakBatchSafe(group.SteamId, group.Writes), internalWrite);
 				statTrakFlushes[group.SteamId] = task;
 				tasks.Add(task);
 				_ = task.ContinueWith(
-					_ => CompleteStatTrakFlush(group.SteamId, task),
+						_ => CompleteStatTrakFlush(group.SteamId, task, group.Writes),
 					CancellationToken.None,
 					TaskContinuationOptions.ExecuteSynchronously,
 					TaskScheduler.Default);
@@ -308,25 +387,43 @@ public sealed class LoadoutStore
 		return tasks.Count == 0 ? Task.CompletedTask : Task.WhenAll(tasks);
 	}
 
+	// Queue game and Discord saves together. Save earlier kills before a counter reset.
+	public Task RunMutationAsync(ulong steamId, Func<Task> operation, CancellationToken cancellationToken = default)
+	{
+		cancellationToken.ThrowIfCancellationRequested();
+		lock (writeSync)
+		{
+			var counters = FlushStatTrakCore(steamId, false);
+			var mutation = Queue(steamId, async () =>
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+				await counters;
+				await operation();
+			});
+			return mutation.WaitAsync(cancellationToken);
+		}
+	}
+
 	public Task SaveKnife(ulong steamId, CsTeam team, int defIndex)
 	{
 		return QueueLatest(new WriteKey(steamId, team, 0, WriteKind.Knife), async () =>
 		{
-			await using var connection = await database.Open();
+			await using var connection = await database.Open(writeCancellation.Token);
 			await WriteKnife(connection, null, steamId, team, defIndex);
 		});
 	}
 
-	public Task SaveGloves(ulong steamId, CsTeam team, TeamLoadout side)
+	public Task SaveGloves(ulong steamId, CsTeam team, TeamLoadout side, WeaponFields fields = WeaponFields.All)
 	{
 		var defIndex = side.GloveDef;
 		var paint = side.GlovePaint;
 		var weapon = defIndex > 0 ? Snapshot(side.Gloves) : default;
-		return QueueLatest(new WriteKey(steamId, team, 0, WriteKind.Gloves), () => Transaction(async (connection, transaction) =>
+		return QueueLatest(new WriteKey(steamId, team, defIndex, WriteKind.Gloves, paint, fields), () => Transaction(async (connection, transaction) =>
 		{
-			await WriteGloves(connection, transaction, steamId, team, defIndex, paint);
+			if (fields is WeaponFields.None or WeaponFields.All || defIndex <= 0)
+				await WriteGloves(connection, transaction, steamId, team, defIndex, paint);
 			if (defIndex > 0)
-				await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon);
+				await WriteWeapon(connection, transaction, steamId, team, defIndex, weapon, fields);
 		}));
 	}
 
@@ -351,10 +448,29 @@ public sealed class LoadoutStore
 			: Run("DELETE FROM ws_pins WHERE steamid = @sid;", steamId, CsTeam.None));
 	}
 
-	private void ForgetStatTrak(ulong steamId, CsTeam team, int defIndex, int paint)
+	private long CaptureCounterVersion()
 	{
 		lock (writeSync)
-			pendingStatTrak.Remove(new StatTrakKey(steamId, team, defIndex, paint));
+			return counterVersion;
+	}
+
+	public void ResetStatTrak(ulong steamId, CsTeam team, int defIndex, int paint, long throughVersion = long.MaxValue)
+	{
+		lock (writeSync)
+		{
+			var key = new StatTrakKey(steamId, team, defIndex, paint);
+			var epoch = counterEpochs.GetValueOrDefault(key) + 1;
+			counterEpochs[key] = epoch;
+			persistedCounterVersions[key] = Math.Max(persistedCounterVersions.GetValueOrDefault(key),
+				throughVersion == long.MaxValue ? counterVersion : throughVersion);
+			if (pendingStatTrak.TryGetValue(key, out var value))
+			{
+				if (value.Version <= throughVersion)
+					pendingStatTrak.Remove(key);
+				else
+					pendingStatTrak[key] = value with { Epoch = epoch };
+			}
+		}
 	}
 
 	private Task QueueLatest(WriteKey key, Func<Task> operation)
@@ -364,7 +480,10 @@ public sealed class LoadoutStore
 
 		lock (writeSync)
 		{
+			if (!acceptingWrites)
+				return Task.FromException(new InvalidOperationException("The loadout store is stopping"));
 			if (coalescedWrites.TryGetValue(key, out var pending) &&
+				!pending.Runner.IsCompleted &&
 				writeTails.TryGetValue(key.SteamId, out var tail) &&
 				ReferenceEquals(tail, pending.Runner))
 			{
@@ -384,75 +503,86 @@ public sealed class LoadoutStore
 
 	private async Task RunCoalesced(WriteKey key, CoalescedWrite state)
 	{
+		while (true)
+		{
+			Func<Task> operation;
+			long version;
+			lock (writeSync)
+			{
+				operation = state.Operation;
+				version = state.Version;
+			}
+
+			await operation();
+
+			lock (writeSync)
+			{
+				if (state.Version != version)
+					continue;
+				if (coalescedWrites.TryGetValue(key, out var current) && ReferenceEquals(current, state))
+					coalescedWrites.Remove(key);
+				return;
+			}
+		}
+	}
+
+	public void BeginStop()
+	{
+		lock (writeSync)
+			acceptingWrites = false;
+	}
+
+	public async Task Stop(CancellationToken cancellationToken = default)
+	{
+		BeginStop();
+		using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		deadline.CancelAfter(TimeSpan.FromSeconds(10));
 		try
 		{
-			while (true)
-			{
-				Func<Task> operation;
-				long version;
-				lock (writeSync)
-				{
-					operation = state.Operation;
-					version = state.Version;
-				}
-
-				await operation();
-
-				lock (writeSync)
-				{
-					if (state.Version != version)
-						continue;
-
-					if (coalescedWrites.TryGetValue(key, out var current) && ReferenceEquals(current, state))
-						coalescedWrites.Remove(key);
-					return;
-				}
-			}
+			await FlushRequestedCounters(null, true, deadline.Token);
 		}
 		finally
 		{
+			Task[] pending;
 			lock (writeSync)
 			{
-				if (coalescedWrites.TryGetValue(key, out var current) && ReferenceEquals(current, state))
-					coalescedWrites.Remove(key);
+				pending = writeTails.Values.ToArray();
+				drainCompletion = Task.WhenAll(pending);
+			}
+			try
+			{
+				if (pending.Length > 0)
+					await drainCompletion.WaitAsync(deadline.Token);
+			}
+			finally
+			{
+				writeCancellation.Cancel();
+				// Observe unfinished tasks without delaying shutdown.
+				foreach (var task in pending)
+					_ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 			}
 		}
 	}
 
-	public async Task Stop()
-	{
-		Task[] pending;
-		lock (writeSync)
-		{
-			acceptingWrites = false;
-			pending = writeTails.Values.ToArray();
-		}
-
-		if (pending.Length > 0)
-			await Task.WhenAll(pending);
-	}
-
-	private Task Queue(ulong steamId, Func<Task> operation)
+	private Task Queue(ulong steamId, Func<Task> operation, bool internalWrite = false)
 	{
 		if (!database.Configured)
 			return Task.CompletedTask;
 
 		Task next;
+		QueuedWrite state;
 		lock (writeSync)
 		{
-			if (!acceptingWrites)
+			if (!acceptingWrites && !internalWrite)
 				return Task.FromException(new InvalidOperationException("The loadout store is stopping"));
 
-			var playerPending = pendingByPlayer.GetValueOrDefault(steamId);
-			if (pendingWrites >= MaxPendingWrites || playerPending >= MaxPendingWritesPerPlayer)
-				return Task.FromException(new InvalidOperationException("The database write queue is full"));
-
-			pendingWrites++;
-			pendingByPlayer[steamId] = playerPending + 1;
-
+			state = new QueuedWrite(steamId);
+			// Wait for queue space and keep saves in submission order.
+			state.Waiting = admissionWaiters.AddLast(state);
+			AdmitWaitingWrites();
 			var previous = writeTails.GetValueOrDefault(steamId, Task.CompletedTask);
 			next = previous.ContinueWith(
-				_ => RunWrite(operation),
+				_ => RunQueuedWrite(state, operation),
 				CancellationToken.None,
 				TaskContinuationOptions.None,
 				TaskScheduler.Default).Unwrap();
@@ -460,7 +590,7 @@ public sealed class LoadoutStore
 		}
 
 		_ = next.ContinueWith(
-			_ => CompleteWrite(steamId, next),
+			_ => CompleteWrite(state, next),
 			CancellationToken.None,
 			TaskContinuationOptions.ExecuteSynchronously,
 			TaskScheduler.Default);
@@ -468,12 +598,53 @@ public sealed class LoadoutStore
 		return next;
 	}
 
+	private void AdmitWaitingWrites()
+	{
+		for (var node = admissionWaiters.First; node != null && pendingWrites < MaxPendingWrites;)
+		{
+			var next = node.Next;
+			var state = node.Value;
+			var count = pendingByPlayer.GetValueOrDefault(state.SteamId);
+			if (count < MaxPendingWritesPerPlayer)
+			{
+				admissionWaiters.Remove(node);
+				state.Waiting = null;
+				state.Admitted = true;
+				pendingWrites++;
+				pendingByPlayer[state.SteamId] = count + 1;
+				state.Admission.TrySetResult();
+			}
+			node = next;
+		}
+	}
+
+	private async Task RunQueuedWrite(QueuedWrite state, Func<Task> operation)
+	{
+		await state.Admission.Task.WaitAsync(writeCancellation.Token);
+		await RunWrite(operation);
+	}
+
 	private async Task RunWrite(Func<Task> operation)
 	{
-		await writeSlots.WaitAsync();
+		await writeSlots.WaitAsync(writeCancellation.Token);
 		try
 		{
-			await operation();
+			var attempt = 0;
+			while (true)
+			{
+				writeCancellation.Token.ThrowIfCancellationRequested();
+				try
+				{
+					await operation();
+					return;
+				}
+				catch (Exception ex) when (IsTransient(ex) && !writeCancellation.IsCancellationRequested)
+				{
+					try { WriteFailed?.Invoke(ex); } catch { }
+					attempt = Math.Min(attempt + 1, 6);
+					await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, 1 << attempt)), writeCancellation.Token);
+				}
+			}
 		}
 		finally
 		{
@@ -481,115 +652,155 @@ public sealed class LoadoutStore
 		}
 	}
 
-	private void CompleteWrite(ulong steamId, Task completed)
+	private static bool IsTransient(Exception exception)
+	{
+		return exception is MySqlException { IsTransient: true } or TimeoutException or IOException;
+	}
+
+	private void CompleteWrite(QueuedWrite state, Task completed)
 	{
 		lock (writeSync)
 		{
-			pendingWrites--;
-
-			var playerPending = pendingByPlayer.GetValueOrDefault(steamId);
-			if (playerPending <= 1)
-				pendingByPlayer.Remove(steamId);
-			else
-				pendingByPlayer[steamId] = playerPending - 1;
+			var steamId = state.SteamId;
+			if (state.Waiting != null)
+				admissionWaiters.Remove(state.Waiting);
+			if (state.Admitted)
+			{
+				pendingWrites--;
+				var playerPending = pendingByPlayer.GetValueOrDefault(steamId);
+				if (playerPending <= 1)
+					pendingByPlayer.Remove(steamId);
+				else
+					pendingByPlayer[steamId] = playerPending - 1;
+			}
 
 			if (writeTails.TryGetValue(steamId, out var tail) && ReferenceEquals(tail, completed))
 				writeTails.Remove(steamId);
+			if (!writeTails.ContainsKey(steamId) && !pendingStatTrak.Keys.Any(key => key.SteamId == steamId))
+			{
+				// No older counter save remains. Release its tracking data.
+				foreach (var key in counterEpochs.Keys.Where(key => key.SteamId == steamId).ToArray())
+					counterEpochs.Remove(key);
+				foreach (var key in persistedCounterVersions.Keys.Where(key => key.SteamId == steamId).ToArray())
+					persistedCounterVersions.Remove(key);
+			}
+			AdmitWaitingWrites();
 		}
 	}
 
 	private async Task WriteStatTrakBatchSafe(ulong steamId, StatTrakWrite[] writes)
 	{
-		await WriteStatTrakBatch(steamId, writes);
+		var applied = await WriteStatTrakBatch(steamId, writes);
 		lock (writeSync)
 		{
-			foreach (var write in writes)
+			foreach (var write in applied)
 			{
 				var key = new StatTrakKey(steamId, write.Team, write.DefIndex, write.Paint);
-				if (pendingStatTrak.TryGetValue(key, out var current) && current == write.Count)
+				persistedCounterVersions[key] = Math.Max(persistedCounterVersions.GetValueOrDefault(key), write.Value.Version);
+				if (pendingStatTrak.TryGetValue(key, out var current) && current == write.Value)
 					pendingStatTrak.Remove(key);
 			}
 		}
 	}
 
-	private void CompleteStatTrakFlush(ulong steamId, Task task)
+	private void CompleteStatTrakFlush(ulong steamId, Task task, StatTrakWrite[] writes)
 	{
 		lock (writeSync)
 		{
 			if (statTrakFlushes.TryGetValue(steamId, out var current) && ReferenceEquals(current, task))
 				statTrakFlushes.Remove(steamId);
+			foreach (var write in writes)
+			{
+				var key = new StatTrakKey(steamId, write.Team, write.DefIndex, write.Paint);
+				if (scheduledStatTrak.TryGetValue(key, out var value) && value == write.Value)
+					scheduledStatTrak.Remove(key);
+			}
 		}
 	}
 
-	private async Task WriteStatTrakBatch(ulong steamId, StatTrakWrite[] writes)
+	private async Task<StatTrakWrite[]> WriteStatTrakBatch(ulong steamId, StatTrakWrite[] writes)
 	{
-		await using var connection = await database.Open();
-		await using var transaction = await connection.BeginTransactionAsync();
+		await using var connection = await database.Open(writeCancellation.Token);
+		await using var transaction = await connection.BeginTransactionAsync(writeCancellation.Token);
 		await using var command = connection.CreateCommand();
 		command.Transaction = transaction;
-		command.CommandText = "UPDATE ws_weapons SET stattrak = @count WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
+		command.CommandText = "UPDATE ws_weapons SET stattrak = GREATEST(stattrak, @count) WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint AND stattrak >= 0;";
 		command.Parameters.AddWithValue("@sid", steamId);
 		command.Parameters.AddWithValue("@team", 0);
 		command.Parameters.AddWithValue("@def", 0);
 		command.Parameters.AddWithValue("@paint", 0);
 		command.Parameters.AddWithValue("@count", 0);
+		var applied = new List<StatTrakWrite>(writes.Length);
 
 		foreach (var write in writes)
 		{
+			lock (writeSync)
+			{
+				if (counterEpochs.GetValueOrDefault(new StatTrakKey(steamId, write.Team, write.DefIndex, write.Paint)) != write.Value.Epoch)
+					continue;
+			}
 			command.Parameters["@team"].Value = (sbyte)write.Team;
 			command.Parameters["@def"].Value = write.DefIndex;
 			command.Parameters["@paint"].Value = write.Paint;
-			command.Parameters["@count"].Value = write.Count;
-			await command.ExecuteNonQueryAsync();
+			command.Parameters["@count"].Value = write.Value.Count;
+			await command.ExecuteNonQueryAsync(writeCancellation.Token);
+			applied.Add(write);
 		}
 
-		await transaction.CommitAsync();
+		await transaction.CommitAsync(writeCancellation.Token);
+		return applied.ToArray();
 	}
 
 	private async Task Transaction(Func<MySqlConnection, MySqlTransaction, Task> operation)
 	{
-		await using var connection = await database.Open();
-		await using var transaction = await connection.BeginTransactionAsync();
+		await using var connection = await database.Open(writeCancellation.Token);
+		await using var transaction = await connection.BeginTransactionAsync(writeCancellation.Token);
 		await operation(connection, transaction);
-		await transaction.CommitAsync();
+		await transaction.CommitAsync(writeCancellation.Token);
 	}
 
 	private async Task Run(string sql, ulong steamId, CsTeam team, params (string Name, object Value)[] extra)
 	{
-		await using var connection = await database.Open();
+		await using var connection = await database.Open(writeCancellation.Token);
 		await using var command = connection.CreateCommand();
 		command.CommandText = sql;
 		command.Parameters.AddWithValue("@sid", steamId);
 		command.Parameters.AddWithValue("@team", (sbyte)team);
 		foreach (var (name, value) in extra)
 			command.Parameters.AddWithValue(name, value);
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(writeCancellation.Token);
 	}
 
-	private static async Task WriteWeapon(
+	private async Task WriteWeapon(
 		MySqlConnection connection,
 		MySqlTransaction? transaction,
 		ulong steamId,
 		CsTeam team,
 		int defIndex,
-		WeaponSnapshot weapon)
+		WeaponSnapshot weapon,
+		WeaponFields fields = WeaponFields.All)
 	{
 		await using var command = connection.CreateCommand();
 		command.Transaction = transaction;
+		var updates = new List<string>(4);
+		if ((fields & WeaponFields.Wear) != 0) updates.Add("wear = @wear");
+		if ((fields & WeaponFields.Seed) != 0) updates.Add("seed = @seed");
+		if ((fields & WeaponFields.NameTag) != 0) updates.Add("nametag = @nametag");
+		if ((fields & WeaponFields.StatTrak) != 0) updates.Add("stattrak = @stattrak");
 		command.CommandText = """
 			INSERT INTO ws_weapons (steamid, team, defindex, paint, wear, seed, nametag, stattrak)
 			VALUES (@sid, @team, @def, @paint, @wear, @seed, @nametag, @stattrak)
-			ON DUPLICATE KEY UPDATE wear = @wear, seed = @seed, nametag = @nametag, stattrak = @stattrak;
-			""";
+			ON DUPLICATE KEY UPDATE
+			""" + " " + (updates.Count == 0 ? "paint = paint" : string.Join(", ", updates)) + ";";
 		AddKey(command, steamId, team, defIndex, weapon.Paint);
 		command.Parameters.AddWithValue("@wear", weapon.Wear);
 		command.Parameters.AddWithValue("@seed", weapon.Seed);
 		command.Parameters.AddWithValue("@nametag", (object?)weapon.NameTag ?? DBNull.Value);
 		command.Parameters.AddWithValue("@stattrak", weapon.StatTrak);
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(writeCancellation.Token);
 	}
 
-	private static async Task WriteEquipped(
+	private async Task WriteEquipped(
 		MySqlConnection connection,
 		MySqlTransaction? transaction,
 		ulong steamId,
@@ -605,10 +816,10 @@ public sealed class LoadoutStore
 			ON DUPLICATE KEY UPDATE paint = @paint;
 			""";
 		AddKey(command, steamId, team, defIndex, paint);
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(writeCancellation.Token);
 	}
 
-	private static async Task WriteStickers(
+	private async Task WriteStickers(
 		MySqlConnection connection,
 		MySqlTransaction transaction,
 		ulong steamId,
@@ -622,7 +833,7 @@ public sealed class LoadoutStore
 			command.Transaction = transaction;
 			command.CommandText = "DELETE FROM ws_stickers WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
 			AddKey(command, steamId, team, defIndex, paint);
-			await command.ExecuteNonQueryAsync();
+			await command.ExecuteNonQueryAsync(writeCancellation.Token);
 		}
 
 		foreach (var sticker in stickers)
@@ -642,11 +853,11 @@ public sealed class LoadoutStore
 			insert.Parameters.AddWithValue("@x", sticker.OffsetX);
 			insert.Parameters.AddWithValue("@y", sticker.OffsetY);
 			insert.Parameters.AddWithValue("@schema", (sbyte)sticker.Schema);
-			await insert.ExecuteNonQueryAsync();
+			await insert.ExecuteNonQueryAsync(writeCancellation.Token);
 		}
 	}
 
-	private static async Task WriteCharm(
+	private async Task WriteCharm(
 		MySqlConnection connection,
 		MySqlTransaction? transaction,
 		ulong steamId,
@@ -662,7 +873,7 @@ public sealed class LoadoutStore
 		{
 			command.CommandText = "DELETE FROM ws_charms WHERE steamid = @sid AND team = @team AND defindex = @def AND paint = @paint;";
 			AddKey(command, steamId, team, defIndex, paint);
-			await command.ExecuteNonQueryAsync();
+			await command.ExecuteNonQueryAsync(writeCancellation.Token);
 			return;
 		}
 
@@ -681,10 +892,10 @@ public sealed class LoadoutStore
 		command.Parameters.AddWithValue("@x", value.OffsetX);
 		command.Parameters.AddWithValue("@y", value.OffsetY);
 		command.Parameters.AddWithValue("@z", value.OffsetZ);
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(writeCancellation.Token);
 	}
 
-	private static async Task WriteKnife(
+	private async Task WriteKnife(
 		MySqlConnection connection,
 		MySqlTransaction? transaction,
 		ulong steamId,
@@ -710,10 +921,10 @@ public sealed class LoadoutStore
 			command.CommandText = "DELETE FROM ws_knives WHERE steamid = @sid AND team = @team;";
 		}
 
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(writeCancellation.Token);
 	}
 
-	private static async Task WriteGloves(
+	private async Task WriteGloves(
 		MySqlConnection connection,
 		MySqlTransaction transaction,
 		ulong steamId,
@@ -741,7 +952,7 @@ public sealed class LoadoutStore
 			command.CommandText = "DELETE FROM ws_gloves WHERE steamid = @sid AND team = @team;";
 		}
 
-		await command.ExecuteNonQueryAsync();
+		await command.ExecuteNonQueryAsync(writeCancellation.Token);
 	}
 
 	private static void AddKey(MySqlCommand command, ulong steamId, CsTeam team, int defIndex, int paint)
@@ -754,13 +965,17 @@ public sealed class LoadoutStore
 
 	private static WeaponSnapshot Snapshot(WeaponEntry entry)
 	{
-		return new WeaponSnapshot(entry.Paint, entry.Wear, entry.Seed, entry.NameTag, entry.StatTrak);
+		return new WeaponSnapshot(entry.Paint,
+			CosmeticRules.IsValidWear(entry.Wear) ? entry.Wear : 0.000001f,
+			Math.Clamp(entry.Seed, 0, 1000),
+			entry.NameTag is { Length: > 64 } name ? name[..64] : entry.NameTag,
+			Math.Max(entry.StatTrak, -1));
 	}
 
 	private static StickerSnapshot[] Snapshot(List<StickerEntry> stickers)
 	{
 		return stickers
-			.Where(sticker => sticker.Slot is >= 0 and <= 5 && sticker.Id > 0)
+			.Where(CosmeticRules.IsValidSticker)
 			.GroupBy(sticker => sticker.Slot)
 			.Select(group => group.Last())
 			.Select(sticker => new StickerSnapshot(
@@ -777,7 +992,7 @@ public sealed class LoadoutStore
 
 	private static CharmSnapshot? Snapshot(CharmEntry? charm)
 	{
-		return charm == null
+		return charm == null || !CosmeticRules.IsValidCharm(charm)
 			? null
 			: new CharmSnapshot(
 				charm.Id,

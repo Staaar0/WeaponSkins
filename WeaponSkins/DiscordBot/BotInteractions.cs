@@ -30,6 +30,7 @@ public sealed partial class BotApp
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
+            if (cancellationToken.IsCancellationRequested) return;
             logger.LogError(ex, "WeaponSkinsBOT interaction failed");
             var message = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.";
             if (interaction.HasResponded) await interaction.FollowupAsync(message, ephemeral: true, allowedMentions: AllowedMentions.None);

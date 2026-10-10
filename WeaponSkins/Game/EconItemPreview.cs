@@ -1,4 +1,6 @@
 using System.Net;
+using System.Buffers.Binary;
+using System.Text;
 
 namespace WeaponSkins;
 
@@ -20,6 +22,8 @@ public sealed class EconSticker
 public sealed class EconItemPreview
 {
 	private const string MarkerText = "csgo_econ_action_preview";
+	private const int MaximumInputLength = 65536;
+	private static readonly UTF8Encoding TextEncoding = new(false, true);
 
 	public int DefIndex;
 	public int PaintIndex;
@@ -39,6 +43,8 @@ public sealed class EconItemPreview
 	public static bool TryParse(string input, out EconItemPreview item)
 	{
 		item = new EconItemPreview();
+		if (string.IsNullOrWhiteSpace(input) || input.Length > MaximumInputLength)
+			return false;
 
 		var hex = ExtractHex(input);
 		if (hex == null || hex.Length < 12 || hex.Length % 2 != 0)
@@ -66,7 +72,14 @@ public sealed class EconItemPreview
 
 		try
 		{
-			return ParseBlock(bytes.AsSpan(1, bytes.Length - 5), item) && item.DefIndex > 0;
+			var parsed = new EconItemPreview();
+			if (!ParseBlock(bytes.AsSpan(1, bytes.Length - 5), parsed) ||
+				parsed.DefIndex is <= 0 or > ushort.MaxValue ||
+				!CosmeticRules.IsValidWear(parsed.PaintWear) || !CosmeticRules.IsValidSeed(parsed.PaintSeed))
+				return false;
+
+			item = parsed;
+			return true;
 		}
 		catch
 		{
@@ -111,35 +124,39 @@ public sealed class EconItemPreview
 		var pos = 0;
 		while (pos < data.Length)
 		{
-			var tag = ReadVarint(data, ref pos);
-			var field = (int)(tag >> 3);
-			var wire = (int)(tag & 7);
+			var (field, wire) = ReadTag(data, ref pos);
+			if (field is 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 17)
+				RequireWire(wire, 0);
+			else if (field is 11 or 12 or 20)
+				RequireWire(wire, 2);
 
 			switch (field)
 			{
 				case 3:
-					item.DefIndex = (int)ReadVarint(data, ref pos);
+					item.DefIndex = ReadInt(data, ref pos);
 					break;
 				case 4:
-					item.PaintIndex = (int)ReadVarint(data, ref pos);
+					item.PaintIndex = ReadInt(data, ref pos);
 					break;
 				case 5:
-					item.Rarity = (int)ReadVarint(data, ref pos);
+					item.Rarity = ReadInt(data, ref pos);
 					break;
 				case 6:
-					item.Quality = (int)ReadVarint(data, ref pos);
+					item.Quality = ReadInt(data, ref pos);
 					break;
 				case 7:
-					item.PaintWear = BitConverter.UInt32BitsToSingle((uint)ReadVarint(data, ref pos));
+					item.PaintWear = BitConverter.UInt32BitsToSingle(ReadUInt(data, ref pos));
+					if (!CosmeticRules.IsValidWear(item.PaintWear))
+						throw new FormatException();
 					break;
 				case 8:
-					item.PaintSeed = (int)ReadVarint(data, ref pos);
+					item.PaintSeed = ReadInt(data, ref pos);
 					break;
 				case 9:
-					item.KillEaterType = (int)ReadVarint(data, ref pos);
+					item.KillEaterType = ReadInt(data, ref pos);
 					break;
 				case 10:
-					item.KillEaterValue = (int)ReadVarint(data, ref pos);
+					item.KillEaterValue = ReadInt(data, ref pos);
 					break;
 				case 11:
 					item.CustomName = ReadString(data, ref pos);
@@ -148,7 +165,7 @@ public sealed class EconItemPreview
 					item.Stickers.Add(ParseSticker(ReadBytes(data, ref pos)));
 					break;
 				case 17:
-					item.MusicIndex = (int)ReadVarint(data, ref pos);
+					item.MusicIndex = ReadInt(data, ref pos);
 					break;
 				case 20:
 					item.Keychains.Add(ParseSticker(ReadBytes(data, ref pos)));
@@ -168,23 +185,29 @@ public sealed class EconItemPreview
 		var pos = 0;
 		while (pos < data.Length)
 		{
-			var tag = ReadVarint(data, ref pos);
-			var field = (int)(tag >> 3);
-			var wire = (int)(tag & 7);
+			var (field, wire) = ReadTag(data, ref pos);
+			if (field is 1 or 2 or 10 or 11 or 12)
+				RequireWire(wire, 0);
+			else if (field is 3 or 4 or 5 or 7 or 8 or 9)
+				RequireWire(wire, 5);
 
 			switch (field)
 			{
 				case 1:
-					sticker.Slot = (int)ReadVarint(data, ref pos);
+					sticker.Slot = ReadInt(data, ref pos);
 					break;
 				case 2:
-					sticker.Id = (int)ReadVarint(data, ref pos);
+					sticker.Id = ReadInt(data, ref pos);
 					break;
 				case 3:
 					sticker.Wear = ReadFloat(data, ref pos);
+					if (!CosmeticRules.IsValidWear(sticker.Wear))
+						throw new FormatException();
 					break;
 				case 4:
 					sticker.Scale = ReadFloat(data, ref pos);
+					if (sticker.Scale < 0f)
+						throw new FormatException();
 					break;
 				case 5:
 					sticker.Rotation = ReadFloat(data, ref pos);
@@ -199,13 +222,13 @@ public sealed class EconItemPreview
 					sticker.OffsetZ = ReadFloat(data, ref pos);
 					break;
 				case 10:
-					sticker.Pattern = (int)ReadVarint(data, ref pos);
+					sticker.Pattern = ReadInt(data, ref pos);
 					break;
 				case 11:
-					sticker.Highlight = (int)ReadVarint(data, ref pos);
+					sticker.Highlight = ReadInt(data, ref pos);
 					break;
 				case 12:
-					sticker.Sticker = (int)ReadVarint(data, ref pos);
+					sticker.Sticker = ReadInt(data, ref pos);
 					break;
 				default:
 					Skip(data, ref pos, wire);
@@ -219,35 +242,68 @@ public sealed class EconItemPreview
 	private static ulong ReadVarint(ReadOnlySpan<byte> data, ref int pos)
 	{
 		ulong value = 0;
-		var shift = 0;
-		while (pos < data.Length)
+		for (var index = 0; index < 10 && pos < data.Length; index++)
 		{
 			var b = data[pos++];
-			value |= (ulong)(b & 0x7F) << shift;
+			if (index == 9 && b > 1)
+				throw new FormatException();
+			value |= (ulong)(b & 0x7F) << (index * 7);
 			if ((b & 0x80) == 0)
 				return value;
-			shift += 7;
-			if (shift > 63)
-				break;
 		}
 
 		throw new FormatException();
 	}
 
+	private static (int Field, int Wire) ReadTag(ReadOnlySpan<byte> data, ref int pos)
+	{
+		var tag = ReadVarint(data, ref pos);
+		var field = tag >> 3;
+		var wire = (int)(tag & 7);
+		if (field == 0 || field > 0x1FFFFFFF || wire is not (0 or 1 or 2 or 5))
+			throw new FormatException();
+		return ((int)field, wire);
+	}
+
+	private static void RequireWire(int actual, int expected)
+	{
+		if (actual != expected)
+			throw new FormatException();
+	}
+
+	private static uint ReadUInt(ReadOnlySpan<byte> data, ref int pos)
+	{
+		var value = ReadVarint(data, ref pos);
+		if (value > uint.MaxValue)
+			throw new FormatException();
+		return (uint)value;
+	}
+
+	private static int ReadInt(ReadOnlySpan<byte> data, ref int pos)
+	{
+		var value = ReadVarint(data, ref pos);
+		if (value > int.MaxValue)
+			throw new FormatException();
+		return (int)value;
+	}
+
 	private static float ReadFloat(ReadOnlySpan<byte> data, ref int pos)
 	{
-		if (pos + 4 > data.Length)
+		if (data.Length - pos < 4)
 			throw new FormatException();
-		var value = BitConverter.ToSingle(data.Slice(pos, 4));
+		var value = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(data.Slice(pos, 4)));
 		pos += 4;
+		if (!float.IsFinite(value))
+			throw new FormatException();
 		return value;
 	}
 
 	private static ReadOnlySpan<byte> ReadBytes(ReadOnlySpan<byte> data, ref int pos)
 	{
-		var length = (int)ReadVarint(data, ref pos);
-		if (length < 0 || pos + length > data.Length)
+		var encodedLength = ReadVarint(data, ref pos);
+		if (encodedLength > (ulong)(data.Length - pos))
 			throw new FormatException();
+		var length = (int)encodedLength;
 		var span = data.Slice(pos, length);
 		pos += length;
 		return span;
@@ -255,7 +311,7 @@ public sealed class EconItemPreview
 
 	private static string ReadString(ReadOnlySpan<byte> data, ref int pos)
 	{
-		return System.Text.Encoding.UTF8.GetString(ReadBytes(data, ref pos));
+		return TextEncoding.GetString(ReadBytes(data, ref pos));
 	}
 
 	private static void Skip(ReadOnlySpan<byte> data, ref int pos, int wire)
@@ -266,17 +322,24 @@ public sealed class EconItemPreview
 				ReadVarint(data, ref pos);
 				break;
 			case 1:
-				pos += 8;
+				Advance(data, ref pos, 8);
 				break;
 			case 2:
 				ReadBytes(data, ref pos);
 				break;
 			case 5:
-				pos += 4;
+				Advance(data, ref pos, 4);
 				break;
 			default:
 				throw new FormatException();
 		}
+	}
+
+	private static void Advance(ReadOnlySpan<byte> data, ref int pos, int count)
+	{
+		if (data.Length - pos < count)
+			throw new FormatException();
+		pos += count;
 	}
 }
 

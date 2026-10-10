@@ -11,8 +11,6 @@ public sealed class WeaponApplier
 
 	private const int GlockDefIndex = 4;
 
-	private static readonly float[] AmmoRestoreDelays = [0.06f, 0.3f, 0.6f];
-
 	private const float RenderWearStep = 0.001f;
 	private const int MaxRenderWearSteps = 21;
 
@@ -235,7 +233,7 @@ public sealed class WeaponApplier
 
 	private void ApplySticker(CEconItemView item, StickerEntry sticker)
 	{
-		if (sticker.Id <= 0 || sticker.Slot < 0 || sticker.Slot > MaxStickerSlot)
+		if (!CosmeticRules.IsValidSticker(sticker) || sticker.Slot < 0 || sticker.Slot > MaxStickerSlot)
 			return;
 
 		var list = item.NetworkedDynamicAttributes;
@@ -319,6 +317,12 @@ public sealed class WeaponApplier
 		if (!stickerWear.TryGetValue(slot, out var byWeapon) || !byWeapon.TryGetValue(defIndex, out var stored))
 			return null;
 
+		if (!float.IsFinite(stored.BaseWear))
+		{
+			byWeapon.Remove(defIndex);
+			return null;
+		}
+
 		var offset = stored.Steps * (double)RenderWearStep;
 		var nudged = stored.BaseWear + offset;
 
@@ -330,6 +334,10 @@ public sealed class WeaponApplier
 
 	private void BumpStickerWear(int slot, int defIndex, float wear)
 	{
+		if (!float.IsFinite(wear))
+			return;
+
+		wear = Math.Clamp(wear, 0f, 1f);
 		if (!stickerWear.TryGetValue(slot, out var byWeapon))
 			stickerWear[slot] = byWeapon = [];
 
@@ -342,7 +350,7 @@ public sealed class WeaponApplier
 
 	private static void ApplyCharm(CEconItemView item, CharmEntry charm)
 	{
-		if (charm.Id <= 0)
+		if (!CosmeticRules.IsValidCharm(charm))
 			return;
 
 		var list = item.NetworkedDynamicAttributes;
@@ -425,7 +433,7 @@ public sealed class WeaponApplier
 
 	public void SyncSpawnViewModel(CCSPlayerController player)
 	{
-		if (!player.IsValid || !player.PawnIsAlive || cache.Get(player) == null)
+		if (plugin.Stopping || !player.IsValid || !player.PawnIsAlive || cache.Get(player) == null)
 			return;
 
 		var weapon = player.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
@@ -494,13 +502,6 @@ public sealed class WeaponApplier
 
 			if (weaponSlot is "slot1" or "slot2")
 			{
-				var defIndex = (int)weapon.AttributeManager.Item.ItemDefinitionIndex;
-				var className = catalog.WeaponClasses.GetValueOrDefault(defIndex) ?? weapon.DesignerName;
-				if (!weaponsWithAmmo.TryGetValue(className, out var ammo))
-					weaponsWithAmmo[className] = ammo = [];
-
-				var reserve = weapon.ReserveAmmo.Length > 0 ? weapon.ReserveAmmo[0] : 0;
-				ammo.Add((weapon.Clip1, reserve));
 				weaponsToKill.Add(weapon.EntityHandle.Raw);
 			}
 		}
@@ -530,8 +531,21 @@ public sealed class WeaponApplier
 			foreach (var weaponHandle in weaponsToKill)
 			{
 				var weapon = ResolveWeapon(weaponHandle);
-				if (weapon != null && OwnedBy(weapon, currentPawn))
-					weapon.AddEntityIOEvent("Kill", weapon, null, "", 0f);
+				if (weapon == null || !OwnedBy(weapon, currentPawn))
+					continue;
+
+				if (!KnifeService.IsKnifeClass(weapon.DesignerName))
+				{
+					var defIndex = (int)weapon.AttributeManager.Item.ItemDefinitionIndex;
+					var className = catalog.WeaponClasses.GetValueOrDefault(defIndex) ?? weapon.DesignerName;
+					if (!weaponsWithAmmo.TryGetValue(className, out var ammo))
+						weaponsWithAmmo[className] = ammo = [];
+
+					var reserve = weapon.ReserveAmmo.Length > 0 ? weapon.ReserveAmmo[0] : 0;
+					ammo.Add((weapon.Clip1, reserve));
+				}
+
+				weapon.AddEntityIOEvent("Kill", weapon, null, "", 0f);
 			}
 
 			killStageComplete = true;
@@ -585,24 +599,6 @@ public sealed class WeaponApplier
 								replacement.ReserveAmmo[0] = ammo.Reserve;
 						});
 
-						if (!needsKnife)
-							continue;
-
-						var restoreAmmo = ammo;
-						foreach (var delay in AmmoRestoreDelays)
-						{
-							plugin.AddTimer(delay, () =>
-							{
-								var latePlayer = ResolveRefreshPlayer(context);
-								var late = ResolveWeapon(replacementHandle);
-								if (latePlayer == null || late == null)
-									return;
-
-								late.Clip1 = restoreAmmo.Clip;
-								if (late.ReserveAmmo.Length > 0)
-									late.ReserveAmmo[0] = restoreAmmo.Reserve;
-							}, TimerFlags.STOP_ON_MAPCHANGE);
-						}
 					}
 				}
 
@@ -671,7 +667,7 @@ public sealed class WeaponApplier
 
 	private CCSPlayerController? ResolveRefreshPlayer(RefreshContext context)
 	{
-		if (context.MapGeneration != mapGeneration ||
+		if (plugin.Stopping || context.MapGeneration != mapGeneration ||
 			!activeRefreshRevisions.TryGetValue(context.Slot, out var revision) || revision != context.RefreshRevision ||
 			lifeRevisions.GetValueOrDefault(context.Slot) != context.LifeRevision)
 			return null;

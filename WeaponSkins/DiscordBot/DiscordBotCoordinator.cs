@@ -11,6 +11,9 @@ public sealed class DiscordBotCoordinator
 	private const int PollSeconds = 3;
 	private const int LeaseSeconds = 15;
 	private const int RestartSeconds = 30;
+	private const int LeaseOperationSeconds = 3;
+	// Leave time to disconnect before the lease expires.
+	private const int LeaseSafetySeconds = 5;
 
 	private readonly WeaponSkins plugin;
 	private readonly Database database;
@@ -22,6 +25,7 @@ public sealed class DiscordBotCoordinator
 	private Task? loop;
 	private Task? botTask;
 	private long nextErrorLog;
+	private long leaseDeadline;
 
 	public DiscordBotCoordinator(WeaponSkins plugin, Database database, string token)
 	{
@@ -39,6 +43,13 @@ public sealed class DiscordBotCoordinator
 		WeaponSkins.PrintDiscordBotLoading();
 		cancellation = new CancellationTokenSource();
 		loop = Run(cancellation.Token);
+		var lifetime = cancellation;
+		_ = loop.ContinueWith(finished =>
+		{
+			if (finished.IsFaulted)
+				plugin.Logger.LogError("WeaponSkinsBOT coordination stopped: {Error}", finished.Exception!.GetBaseException().Message);
+			lifetime.Dispose();
+		}, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 	}
 
 	public void DatabaseReady()
@@ -51,33 +62,46 @@ public sealed class DiscordBotCoordinator
 		databaseReady.TrySetResult(false);
 	}
 
-	public void Stop()
+	public void RequestStop()
 	{
-		cancellation?.Cancel();
+		CancelQuietly(cancellation);
+		CancelQuietly(botCancellation);
+	}
 
+	private static void CancelQuietly(CancellationTokenSource? source)
+	{
+		try { source?.Cancel(); }
+		catch (ObjectDisposedException) { }
+	}
+
+	public void Stop() => StopAsync().GetAwaiter().GetResult();
+
+	public async Task StopAsync(CancellationToken cancellationToken = default)
+	{
+		RequestStop();
+		var running = loop;
+		if (running == null)
+			return;
 		try
 		{
-			loop?.GetAwaiter().GetResult();
+			await running.WaitAsync(TimeSpan.FromSeconds(6), cancellationToken);
 		}
 		catch (OperationCanceledException)
 		{
 		}
+		catch (TimeoutException)
+		{
+			plugin.Logger.LogWarning("WeaponSkinsBOT shutdown exceeded its deadline; cleanup continues in the background");
+		}
 		catch (Exception ex)
 		{
 			plugin.Logger.LogError("WeaponSkinsBOT shutdown failed: {Error}", ex.GetBaseException().Message);
-		}
-		finally
-		{
-			cancellation?.Dispose();
-			cancellation = null;
-			loop = null;
 		}
 	}
 
 	private async Task Run(CancellationToken cancellationToken)
 	{
 		var ownsLease = false;
-		var lastLease = 0L;
 		var nextBotStart = 0L;
 
 		try
@@ -87,35 +111,46 @@ public sealed class DiscordBotCoordinator
 
 			try
 			{
-				await lease.PurgeStale(cancellationToken);
+				using var purgeCancellation = LeaseOperationCancellation(cancellationToken);
+				await lease.PurgeStale(purgeCancellation.Token);
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
 			{
 				LogError(ex);
 			}
 
 			while (!cancellationToken.IsCancellationRequested)
 			{
-				var now = Environment.TickCount64;
 				try
 				{
+					// Wait for the old session to stop before starting another.
+					if (botTask != null && botCancellation?.IsCancellationRequested == true)
+					{
+						if (!botTask.IsCompleted)
+						{
+							await Task.Delay(TimeSpan.FromSeconds(PollSeconds), cancellationToken);
+							continue;
+						}
+						await ObserveBot();
+					}
+
+					var started = Environment.TickCount64;
+					using var operationCancellation = LeaseOperationCancellation(cancellationToken);
 					if (!ownsLease)
 					{
-						ownsLease = await lease.TryAcquire(cancellationToken);
+						ownsLease = await lease.TryAcquire(operationCancellation.Token);
 						if (ownsLease)
-						{
-							lastLease = now;
-						}
+							ConfirmLease(started);
 					}
-					else if (await lease.Renew(cancellationToken))
+					else if (await lease.Renew(operationCancellation.Token))
 					{
-						lastLease = now;
+						ConfirmLease(started);
 					}
 					else
 					{
 						plugin.Logger.LogWarning("WeaponSkinsBOT lease was lost; switching this server to standby");
-						await StopBot();
-						lease.RelinquishLocal();
+						if (await StopBot())
+							lease.RelinquishLocal();
 						ownsLease = false;
 					}
 
@@ -124,7 +159,8 @@ public sealed class DiscordBotCoordinator
 						if (botTask?.IsCompleted == true)
 							await ObserveBot();
 
-						if (botTask == null && now >= nextBotStart)
+						var now = Environment.TickCount64;
+						if (botTask == null && now < leaseDeadline && now >= nextBotStart)
 						{
 							StartBot(cancellationToken);
 							nextBotStart = now + RestartSeconds * 1000L;
@@ -138,11 +174,12 @@ public sealed class DiscordBotCoordinator
 				catch (Exception ex)
 				{
 					LogError(ex);
-					if (ownsLease && now - lastLease >= LeaseSeconds * 1000L)
+					// Include query time when checking the lease.
+					if (ownsLease && Environment.TickCount64 >= leaseDeadline)
 					{
 						plugin.Logger.LogWarning("WeaponSkinsBOT lease could not be renewed; stopping the bot to prevent duplicate sessions");
-						await StopBot();
-						lease.RelinquishLocal();
+						if (await StopBot())
+							lease.RelinquishLocal();
 						ownsLease = false;
 					}
 				}
@@ -152,8 +189,8 @@ public sealed class DiscordBotCoordinator
 		}
 		finally
 		{
-			await StopBot();
-			if (ownsLease)
+			var stopped = await StopBot();
+			if (ownsLease && stopped)
 			{
 				try
 				{
@@ -165,12 +202,37 @@ public sealed class DiscordBotCoordinator
 					LogError(ex);
 				}
 			}
+			else if (stopped)
+				lease.RelinquishLocal();
+			else
+			{
+				// Keep the local lock until the bot stops. Let the database lease expire.
+				_ = botTask!.ContinueWith(_ => lease.RelinquishLocal(),
+					CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+			}
 		}
+	}
+
+	private static CancellationTokenSource LeaseOperationCancellation(CancellationToken cancellationToken)
+	{
+		var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		operation.CancelAfter(TimeSpan.FromSeconds(LeaseOperationSeconds));
+		return operation;
+	}
+
+	private void ConfirmLease(long operationStarted)
+	{
+		// Start the deadline before the query so clock differences cannot extend it.
+		leaseDeadline = operationStarted + (LeaseSeconds - LeaseSafetySeconds) * 1000L;
+		if (botCancellation?.IsCancellationRequested == false)
+			botCancellation.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(0, leaseDeadline - Environment.TickCount64)));
 	}
 
 	private void StartBot(CancellationToken coordinatorToken)
 	{
 		botCancellation = CancellationTokenSource.CreateLinkedTokenSource(coordinatorToken);
+		// The timer also stops the bot if lease renewal hangs.
+		botCancellation.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(0, leaseDeadline - Environment.TickCount64)));
 		var bot = new BotApp(
 			token,
 			database,
@@ -179,7 +241,8 @@ public sealed class DiscordBotCoordinator
 			plugin.Logger,
 			WeaponSkins.PrintDiscordBotConnected,
             steamId => plugin.Links?.WakeSync(steamId),
-            plugin.DiscordPermissionsAsync);
+            plugin.DiscordPermissionsAsync,
+            plugin.Store);
 		botTask = bot.RunAsync(botCancellation.Token);
 	}
 
@@ -204,13 +267,26 @@ public sealed class DiscordBotCoordinator
 		}
 	}
 
-	private async Task StopBot()
+	private async Task<bool> StopBot()
 	{
 		if (botTask == null)
-			return;
+			return true;
 
 		botCancellation?.Cancel();
+		try
+		{
+			await botTask.WaitAsync(TimeSpan.FromSeconds(6));
+		}
+		catch (TimeoutException)
+		{
+			return false;
+		}
+		catch
+		{
+			// ObserveBot logs failures and clears the session.
+		}
 		await ObserveBot();
+		return true;
 	}
 
 	private void LogError(Exception exception)
@@ -270,6 +346,7 @@ public sealed class DiscordBotCoordinator
 				await using (var select = connection.CreateCommand())
 				{
 					select.Transaction = transaction;
+					select.CommandTimeout = LeaseOperationSeconds;
 					select.CommandText = "SELECT owner_id, lease_until <= UTC_TIMESTAMP(6) FROM ws_bot_leases WHERE token_hash = @token FOR UPDATE;";
 					select.Parameters.AddWithValue("@token", tokenHash);
 					await using var reader = await select.ExecuteReaderAsync(cancellationToken);
@@ -284,6 +361,7 @@ public sealed class DiscordBotCoordinator
 				{
 					await using var insert = connection.CreateCommand();
 					insert.Transaction = transaction;
+					insert.CommandTimeout = LeaseOperationSeconds;
 					insert.CommandText = $"INSERT INTO ws_bot_leases (token_hash, owner_id, lease_until) VALUES (@token, @owner, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL {LeaseSeconds} SECOND));";
 					insert.Parameters.AddWithValue("@token", tokenHash);
 					insert.Parameters.AddWithValue("@owner", ownerId);
@@ -298,6 +376,7 @@ public sealed class DiscordBotCoordinator
 				{
 					await using var update = connection.CreateCommand();
 					update.Transaction = transaction;
+					update.CommandTimeout = LeaseOperationSeconds;
 					update.CommandText = $"UPDATE ws_bot_leases SET owner_id = @owner, lease_until = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL {LeaseSeconds} SECOND) WHERE token_hash = @token;";
 					update.Parameters.AddWithValue("@token", tokenHash);
 					update.Parameters.AddWithValue("@owner", ownerId);
@@ -335,7 +414,8 @@ public sealed class DiscordBotCoordinator
 		{
 			await using var connection = await database.Open(cancellationToken);
 			await using var command = connection.CreateCommand();
-			command.CommandText = $"UPDATE ws_bot_leases SET lease_until = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL {LeaseSeconds} SECOND) WHERE token_hash = @token AND owner_id = @owner;";
+			command.CommandTimeout = LeaseOperationSeconds;
+			command.CommandText = $"UPDATE ws_bot_leases SET lease_until = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL {LeaseSeconds} SECOND) WHERE token_hash = @token AND owner_id = @owner AND lease_until > UTC_TIMESTAMP(6);";
 			command.Parameters.AddWithValue("@token", tokenHash);
 			command.Parameters.AddWithValue("@owner", ownerId);
 			return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
@@ -347,6 +427,7 @@ public sealed class DiscordBotCoordinator
 			{
 				await using var connection = await database.Open(cancellationToken);
 				await using var command = connection.CreateCommand();
+				command.CommandTimeout = LeaseOperationSeconds;
 				command.CommandText = "DELETE FROM ws_bot_leases WHERE token_hash = @token AND owner_id = @owner;";
 				command.Parameters.AddWithValue("@token", tokenHash);
 				command.Parameters.AddWithValue("@owner", ownerId);
@@ -364,6 +445,7 @@ public sealed class DiscordBotCoordinator
 		{
 			await using var connection = await database.Open(cancellationToken);
 			await using var command = connection.CreateCommand();
+			command.CommandTimeout = LeaseOperationSeconds;
 			command.CommandText = "DELETE FROM ws_bot_leases WHERE lease_until < DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 7 DAY);";
 			await command.ExecuteNonQueryAsync(cancellationToken);
 		}

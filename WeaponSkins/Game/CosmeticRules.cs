@@ -1,8 +1,30 @@
 namespace WeaponSkins;
 
-// Convert inspect-code decorations for the embedded Discord bot.
+// Shared checks for game and Discord inspect imports.
 public static class CosmeticRules
 {
+	public static bool IsValidWear(float wear) => float.IsFinite(wear) && wear is >= 0f and <= 1f;
+
+	public static bool IsValidSeed(int seed) => seed is >= 0 and <= 1000;
+
+	public static bool IsValidSticker(EconSticker sticker) =>
+		sticker.Id > 0 && sticker.Slot is >= 0 and <= 31 &&
+		IsValidWear(sticker.Wear) && float.IsFinite(sticker.Scale) && sticker.Scale >= 0f &&
+		float.IsFinite(sticker.Rotation) && float.IsFinite(sticker.OffsetX) && float.IsFinite(sticker.OffsetY);
+
+	public static bool IsValidSticker(StickerEntry sticker) =>
+		sticker.Id > 0 && sticker.Slot is >= 0 and < 6 && sticker.Schema is >= -1 and <= 31 &&
+		IsValidWear(sticker.Wear) && float.IsFinite(sticker.Scale) && sticker.Scale >= 0f &&
+		float.IsFinite(sticker.Rotation) && float.IsFinite(sticker.OffsetX) && float.IsFinite(sticker.OffsetY);
+
+	public static bool IsValidCharm(EconSticker charm) =>
+		charm.Id > 0 && charm.Pattern >= 0 && charm.Sticker >= 0 && charm.Highlight >= 0 &&
+		float.IsFinite(charm.OffsetX) && float.IsFinite(charm.OffsetY) && float.IsFinite(charm.OffsetZ);
+
+	public static bool IsValidCharm(CharmEntry charm) =>
+		charm.Id > 0 && charm.Pattern >= 0 && charm.Sticker >= 0 && charm.Highlight >= 0 &&
+		float.IsFinite(charm.OffsetX) && float.IsFinite(charm.OffsetY) && float.IsFinite(charm.OffsetZ);
+
 	public static List<StickerEntry> MapStickers(List<EconSticker> source)
 	{
 		const int slots = 6;
@@ -13,7 +35,7 @@ public static class CosmeticRules
 
 		foreach (var sticker in source)
 		{
-			if (sticker.Id <= 0 || sticker.Slot < 0 || sticker.Slot > 31 || result.Count >= 5)
+			if (!IsValidSticker(sticker) || result.Count >= 5)
 				continue;
 
 			var origin = sticker.Slot;
@@ -70,7 +92,7 @@ public static class CosmeticRules
 
 	public static CharmEntry? MapCharm(List<EconSticker> keychains)
 	{
-		var charm = keychains.FirstOrDefault(k => k.Id > 0);
+		var charm = keychains.FirstOrDefault(IsValidCharm);
 		if (charm == null)
 			return null;
 

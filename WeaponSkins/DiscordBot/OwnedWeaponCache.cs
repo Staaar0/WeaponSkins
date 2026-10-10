@@ -2,7 +2,7 @@ namespace WeaponSkinsBot;
 
 internal sealed record OwnedWeapons(ulong SteamId, int[] Defs);
 
-/// <summary>Keeps successful suggestions visible while a single background refresh runs.</summary>
+// Keeps suggestions while a background refresh runs.
 internal sealed class OwnedWeaponCache(
     Func<ulong, Task<OwnedWeapons>> load,
     Action<Exception> logError,
@@ -21,9 +21,15 @@ internal sealed class OwnedWeaponCache(
 
     private readonly object sync = new();
     private readonly Dictionary<ulong, Entry> entries = [];
-    // Suggestions must not queue behind skin-save transactions.
+    // Keep suggestions separate from skin saves.
     private readonly SemaphoreSlim queries = new(2, 2);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+
+    public Task StopAsync()
+    {
+        lock (sync)
+            return Task.WhenAll(entries.Values.Select(entry => entry.Refresh).OfType<Task>().ToArray());
+    }
 
     public async Task<OwnedWeapons?> GetAsync(ulong user, TimeSpan wait)
     {
@@ -38,7 +44,7 @@ internal sealed class OwnedWeaponCache(
             refresh = entry.Refresh;
         }
 
-        // Only a first lookup needs to wait. It keeps running if Discord's deadline expires.
+        // Only the first lookup waits. A timed-out reply does not cancel the query.
         if (refresh != null)
         {
             try { await refresh.WaitAsync(wait, cancellationToken); }
@@ -55,7 +61,7 @@ internal sealed class OwnedWeaponCache(
             if (entry == null) return;
             if (entry.SteamId != steamId)
             {
-                // A new account link must not inherit the previous account's choices.
+                // Clear suggestions when the linked account changes.
                 entry.Value = null;
                 entry.SteamId = steamId;
                 entry.Revision++;
@@ -71,7 +77,7 @@ internal sealed class OwnedWeaponCache(
         {
             foreach (var (user, entry) in entries)
             {
-                if (entry.Value != null && entry.Value.SteamId != steamId) continue;
+                if (entry.SteamId.HasValue && entry.SteamId.Value != steamId) continue;
                 entry.Revision++;
                 entry.RefreshAfter = default;
                 StartRefresh(user, entry);
@@ -118,7 +124,7 @@ internal sealed class OwnedWeaponCache(
                 finally { queries.Release(); }
                 lock (sync)
                 {
-                    // A save committed during this query: reload instead of publishing old data.
+                    // A save finished during the query. Fetch the new loadout.
                     if (entry.Revision != revision) continue;
                     entry.Value = result;
                     entry.SteamId = result.SteamId;
@@ -136,7 +142,7 @@ internal sealed class OwnedWeaponCache(
         {
             lock (sync)
             {
-                // A failed query is not an empty loadout; retain the last good result.
+                // Keep the last result if the query fails.
                 entry.RefreshAfter = clock.GetUtcNow().AddSeconds(2);
                 entry.Refresh = null;
             }

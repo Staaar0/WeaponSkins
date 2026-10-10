@@ -16,7 +16,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.6";
+	public override string ModuleVersion => "1.1.7";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -67,12 +67,19 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	private Commands? commands;
 	private DiscordBotCoordinator? discordBot;
 	private Task? bootstrapTask;
+	private Task? catalogTask;
+	private Task? shutdownTask;
+	private Task? previousShutdownTask;
+	private readonly CancellationTokenSource lifetimeCancellation = new();
+	private CancellationToken lifetimeToken;
+	internal CancellationToken LifetimeToken => lifetimeToken;
 	private CancellationTokenSource? statTrakFlushCancellation;
 	private Task? statTrakFlushTask;
 	private long nextDatabaseErrorLog;
 	private int suppressedDatabaseErrors;
 	private bool initialized;
 	private volatile bool stopping;
+	private const string PendingShutdownKey = "WeaponSkins.PendingShutdown";
 
 	public void OnConfigParsed(SkinsConfig config)
 	{
@@ -131,12 +138,23 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	public override void Load(bool hotReload)
 	{
+		lifetimeToken = lifetimeCancellation.Token;
+		Task? previousShutdown;
+		lock (AppDomain.CurrentDomain)
+			previousShutdown = AppDomain.CurrentDomain.GetData(PendingShutdownKey) as Task;
+		previousShutdownTask = previousShutdown;
         Instance = this;
 		EconAttributes.Init(Logger);
 
 		Db = new Database(Config.Database);
-		Catalog = new CatalogService(Logger, Path.Combine(ModuleDirectory, "Data"));
+		Catalog = new CatalogService(Logger, Path.Combine(ModuleDirectory, "Data"),
+			(action, token) => Server.NextWorldUpdateAsync(() =>
+			{
+				if (!stopping)
+					action();
+			}).WaitAsync(token));
 		Store = new LoadoutStore(Db);
+		Store.WriteFailed += LogDatabaseError;
 		Cache = new PlayerCache(Store, Logger);
 		Applier = new WeaponApplier(this, Cache, Catalog);
 		GloveApply = new GloveService(this, Cache);
@@ -154,7 +172,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		commands.RegisterLink();
 		events = new Events(this);
 		events.RegisterPrecache();
-		var commandsPrewarm = Task.Run(() => commands.PrepareHandlers(CancellationToken.None));
+		var commandsPrewarm = Task.Run(() => commands.PrepareHandlers(LifetimeToken));
 
 		if (!Links.UsesDiscordUtilities && Config.LinkRequired && !Db.Configured)
 			Logger.LogWarning("link_required is enabled but the database is not configured, Discord linking stays off");
@@ -164,21 +182,8 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		if (!Links.UsesDiscordUtilities && HasDiscordBotToken && !Db.Configured)
 			Logger.LogWarning("discord_bot_token is configured but the database is not, WeaponSkinsBOT stays offline");
 
-		if (Db.Configured)
-		{
-			statTrakFlushCancellation = new CancellationTokenSource();
-			statTrakFlushTask = FlushStatTrakLoop(statTrakFlushCancellation.Token);
-		}
-
-		if (Db.Configured)
-			bootstrapTask = BootstrapAndLoad();
-		else
-		{
-			Logger.LogWarning("Database is not configured, loadouts will not be saved");
-			FinishLoad(hotReload);
-		}
-
-		var catalogLoaded = Catalog.LoadBlocking(Config.Api, Db.Configured);
+		// Load bundled data first; install the online catalog later.
+		var catalogLoaded = Catalog.LoadBundled(LifetimeToken);
 		try
 		{
 			commandsPrewarm.GetAwaiter().GetResult();
@@ -198,33 +203,107 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			Logger.LogWarning("Item data is not loaded yet, retrying on map start");
 		else
 			Menus.Prewarm();
+
+		Catalog.Changed += OnCatalogChanged;
+		if (Db.Configured)
+			bootstrapTask = Task.Run(() => StartAfterPreviousShutdown(previousShutdown, hotReload, LifetimeToken));
+		else
+		{
+			Logger.LogWarning("Database is not configured, loadouts will not be saved");
+			if (previousShutdown is { IsCompleted: false })
+				bootstrapTask = Task.Run(() => StartAfterPreviousShutdown(previousShutdown, hotReload, LifetimeToken));
+			else
+				FinishLoad(hotReload);
+		}
+
+		if (Db.Configured && !string.IsNullOrWhiteSpace(Config.Api.BaseUrl))
+			catalogTask = Task.Run(() => RefreshCatalog(LifetimeToken));
 	}
 
-	private async Task BootstrapAndLoad()
+	private async Task StartAfterPreviousShutdown(Task? previousShutdown, bool hotReload, CancellationToken cancellationToken)
+	{
+		if (previousShutdown != null)
+		{
+			if (!previousShutdown.IsCompleted)
+				Logger.LogInformation("Waiting for the previous WeaponSkins database writes to finish before enabling this instance");
+			try { await previousShutdown.WaitAsync(cancellationToken); }
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+			catch (Exception ex)
+			{
+				Logger.LogWarning("Previous plugin shutdown reported an error: {Error}", ex.GetBaseException().Message);
+			}
+		}
+		if (Db.Configured)
+			await BootstrapAndLoad(cancellationToken);
+		else
+			Server.NextWorldUpdate(() => { if (!stopping) FinishLoad(hotReload); });
+	}
+
+	private void OnCatalogChanged()
+	{
+		if (stopping)
+			return;
+		Menu.CloseAll();
+		Menus.InvalidateCaches();
+		Menus.Prewarm();
+	}
+
+	private async Task RefreshCatalog(CancellationToken cancellationToken)
 	{
 		try
 		{
-			await Db.Bootstrap(Links.CanIssueCodes, DiscordBotEnabled);
-			discordBot?.DatabaseReady();
+			await Catalog.LoadAsync(Config.Api, Db.Configured, cancellationToken);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
 		}
 		catch (Exception ex)
 		{
-			discordBot?.DatabaseUnavailable();
-			if (!stopping)
-				Logger.LogCritical("Database bootstrap failed: {Error}", ex.GetBaseException().Message);
-			return;
+			Logger.LogWarning("Item data refresh failed: {Error}", ex.GetBaseException().Message);
 		}
-
-		Server.NextWorldUpdate(() =>
-		{
-			if (!stopping)
-				FinishLoad(true);
-		});
-
-		await BackfillPermissions();
 	}
 
-	private async Task BackfillPermissions()
+	private async Task BootstrapAndLoad(CancellationToken cancellationToken)
+	{
+		var retrySeconds = 5;
+		while (!cancellationToken.IsCancellationRequested)
+		{
+			try
+			{
+				using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+				attempt.CancelAfter(TimeSpan.FromMinutes(3));
+				await Db.Bootstrap(Links.CanIssueCodes, DiscordBotEnabled, attempt.Token);
+				cancellationToken.ThrowIfCancellationRequested();
+				discordBot?.DatabaseReady();
+
+				Server.NextWorldUpdate(() =>
+				{
+					if (!stopping)
+					{
+						statTrakFlushCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+						statTrakFlushTask = FlushStatTrakLoop(statTrakFlushCancellation.Token);
+						FinishLoad(true);
+					}
+				});
+
+				await BackfillPermissions(cancellationToken);
+				return;
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				return;
+			}
+			catch (Exception ex)
+			{
+				Logger.LogError("Database bootstrap failed; retrying in {Seconds}s: {Error}", retrySeconds, ex.GetBaseException().Message);
+			}
+			try { await Task.Delay(TimeSpan.FromSeconds(retrySeconds), cancellationToken); }
+			catch (OperationCanceledException) { return; }
+			retrySeconds = Math.Min(retrySeconds * 2, 30);
+		}
+	}
+
+	private async Task BackfillPermissions(CancellationToken cancellationToken)
 	{
 		if (!Links.CanIssueCodes || stopping)
 			return;
@@ -232,7 +311,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		List<ulong> linked;
 		try
 		{
-			linked = await LinkStore.ReadLinked(CancellationToken.None);
+			linked = await LinkStore.ReadLinked(cancellationToken);
 		}
 		catch (Exception ex)
 		{
@@ -253,7 +332,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			foreach (var steamId in linked)
 				rows.Add((steamId, StickersAllowed(steamId), GenAllowed(steamId)));
 
-			Save(LinkStore.SavePermissions(rows, CancellationToken.None));
+			Save(LinkStore.SavePermissions(rows, cancellationToken));
 		});
 	}
 
@@ -279,6 +358,8 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	}
 
 	private readonly Dictionary<ulong, (bool Stickers, bool Gen)> publishedPermissions = [];
+	private readonly Dictionary<ulong, ((bool Stickers, bool Gen) Value, long Revision)> pendingPermissions = [];
+	private long permissionRevision;
 	private readonly object permissionSync = new();
 
 	public void EnsureLoadout(ulong steamId)
@@ -295,21 +376,56 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		var stickers = StickersAllowed(steamId);
 		var gen = GenAllowed(steamId);
 
+		long revision;
 		lock (permissionSync)
 		{
-			if (publishedPermissions.TryGetValue(steamId, out var previous) && previous == (stickers, gen))
+			if (pendingPermissions.TryGetValue(steamId, out var pending))
+			{
+				if (pending.Value == (stickers, gen))
+					return;
+			}
+			else if (publishedPermissions.TryGetValue(steamId, out var previous) && previous == (stickers, gen))
 				return;
 
-			publishedPermissions[steamId] = (stickers, gen);
+			revision = ++permissionRevision;
+			pendingPermissions[steamId] = ((stickers, gen), revision);
 		}
 
-		Save(LinkStore.SavePermissions(steamId, stickers, gen, CancellationToken.None));
+		Save(PublishPermissionsAsync(steamId, stickers, gen, revision));
+	}
+
+	private async Task PublishPermissionsAsync(ulong steamId, bool stickers, bool gen, long revision)
+	{
+		try
+		{
+			await Store.RunMutationAsync(steamId,
+				() => LinkStore.SavePermissions(steamId, stickers, gen, LifetimeToken), LifetimeToken);
+			lock (permissionSync)
+			{
+				if (pendingPermissions.TryGetValue(steamId, out var pending) && pending.Revision == revision)
+				{
+					publishedPermissions[steamId] = (stickers, gen);
+					pendingPermissions.Remove(steamId);
+				}
+			}
+		}
+		finally
+		{
+			lock (permissionSync)
+			{
+				if (pendingPermissions.TryGetValue(steamId, out var pending) && pending.Revision == revision)
+					pendingPermissions.Remove(steamId);
+			}
+		}
 	}
 
 	public void ForgetPermissions(ulong steamId)
 	{
 		lock (permissionSync)
+		{
 			publishedPermissions.Remove(steamId);
+			pendingPermissions.Remove(steamId);
+		}
 	}
 
 	public bool CanUseSkins(CCSPlayerController player)
@@ -322,34 +438,82 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		stopping = true;
         if (ReferenceEquals(Instance, this)) Instance = null;
 		events?.Unregister();
+		lifetimeCancellation.Cancel();
 		statTrakFlushCancellation?.Cancel();
-		discordBot?.Stop();
-		Links.Stop();
+		discordBot?.RequestStop();
+		Links.RequestStop();
+		Catalog.Changed -= OnCatalogChanged;
 		Cache.Clear();
 		Applier.Dispose();
 		Menu.CloseAll();
+		// Cancel now, then finish saving in the background.
+		var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		// Also wait for any earlier plugin shutdown.
+		shutdownTask = previousShutdownTask == null
+			? completion.Task : Task.WhenAll(previousShutdownTask, completion.Task);
+		lock (AppDomain.CurrentDomain)
+			AppDomain.CurrentDomain.SetData(PendingShutdownKey, shutdownTask);
+		_ = shutdownTask.ContinueWith(completed =>
+		{
+			if (completed.IsFaulted)
+				_ = completed.Exception;
+			lock (AppDomain.CurrentDomain)
+			{
+				if (ReferenceEquals(AppDomain.CurrentDomain.GetData(PendingShutdownKey), completed))
+					AppDomain.CurrentDomain.SetData(PendingShutdownKey, null);
+			}
+		}, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+		_ = Task.Run(async () =>
+		{
+			Exception? shutdownError = null;
+			try
+			{
+				await ShutdownAsync();
+			}
+			catch (Exception ex)
+			{
+				Logger.LogError("Plugin shutdown failed: {Error}", ex.GetBaseException().Message);
+				shutdownError = ex;
+			}
+			// Let old SQL commands finish before the next instance saves.
+			try { await Store.DrainCompletion; }
+			catch (OperationCanceledException) { }
+			catch (Exception ex)
+			{
+				Logger.LogWarning("Pending database writes ended with an error during shutdown: {Error}", ex.GetBaseException().Message);
+			}
+			if (shutdownError != null)
+				completion.TrySetException(shutdownError);
+			else
+				completion.TrySetResult();
+		});
+	}
 
+	private async Task ShutdownAsync()
+	{
+		using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
 		try
 		{
-			bootstrapTask?.GetAwaiter().GetResult();
+			if (discordBot != null)
+				await discordBot.StopAsync(deadline.Token);
 		}
 		catch (Exception ex)
 		{
-			Logger.LogError("Database bootstrap shutdown failed: {Error}", ex.GetBaseException().Message);
+			Logger.LogError("Discord bot shutdown failed: {Error}", ex.GetBaseException().Message);
 		}
 
 		try
 		{
-			statTrakFlushTask?.GetAwaiter().GetResult();
+			await Links.StopAsync(deadline.Token);
 		}
-		catch (OperationCanceledException)
+		catch (Exception ex)
 		{
+			Logger.LogError("Discord link shutdown failed: {Error}", ex.GetBaseException().Message);
 		}
 
 		try
 		{
-			Store.FlushStatTrak().GetAwaiter().GetResult();
-			Store.Stop().GetAwaiter().GetResult();
+			await Store.Stop(deadline.Token);
 		}
 		catch (Exception ex)
 		{
@@ -357,7 +521,24 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 		finally
 		{
+			await ObserveShutdownTask(bootstrapTask, deadline.Token);
+			await ObserveShutdownTask(catalogTask, deadline.Token);
+			await ObserveShutdownTask(statTrakFlushTask, deadline.Token);
 			statTrakFlushCancellation?.Dispose();
+			Store.WriteFailed -= LogDatabaseError;
+			lifetimeCancellation.Dispose();
+		}
+	}
+
+	private async Task ObserveShutdownTask(Task? task, CancellationToken cancellationToken)
+	{
+		if (task == null)
+			return;
+		try { await task.WaitAsync(cancellationToken); }
+		catch (OperationCanceledException) { }
+		catch (Exception ex)
+		{
+			Logger.LogWarning("Background shutdown failed: {Error}", ex.GetBaseException().Message);
 		}
 	}
 
@@ -385,7 +566,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
 			try
 			{
-				await Store.FlushStatTrak();
+				await Store.FlushStatTrak(cancellationToken: cancellationToken);
 			}
 			catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
 			{
@@ -476,8 +657,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		return !Config.Stickers.VipOnly || HasVip(steamId);
 	}
 
-	// Read the current admin grants on the game thread so Discord permissions
-	// update when admins are reloaded, without restarting the server.
+	// Read current admin permissions on the game thread.
 	internal async Task<WeaponSkinsBot.Database.WeaponSkinsDatabase.Permissions> DiscordPermissionsAsync(
 		ulong steamId, CancellationToken cancellationToken)
 	{

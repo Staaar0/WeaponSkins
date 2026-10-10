@@ -21,8 +21,7 @@ public sealed class Commands
 		this.plugin = plugin;
 	}
 
-	// Prepare managed in-game command and menu paths on a worker during startup.
-	// This never invokes a command or accesses a player or game native.
+	// Warm up command and menu code in the background without using game APIs.
 	internal void PrepareHandlers(CancellationToken cancellationToken)
 	{
 		if (handlersPrepared)
@@ -48,7 +47,7 @@ public sealed class Commands
 				if (method.IsAbstract || method.ContainsGenericParameters)
 					continue;
 				try { RuntimeHelpers.PrepareMethod(method.MethodHandle); }
-				catch (Exception) { /* Optional preparation must not block startup. */ }
+				catch (Exception) { /* Warmup errors must not stop startup. */ }
 			}
 		}
 
@@ -313,7 +312,7 @@ public sealed class Commands
 		float? wear = null;
 		if (info.ArgCount >= 2)
 		{
-			if (!float.TryParse(info.GetArg(1), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || value is < 0f or > 1f)
+			if (!float.TryParse(info.GetArg(1), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || !CosmeticRules.IsValidWear(value))
 			{
 				plugin.Reply(player, "wear_invalid");
 				return;
@@ -577,88 +576,9 @@ public sealed class Commands
 	private string GenName(int defIndex, int paintIndex) =>
 		plugin.Catalog.FindPaint(defIndex, paintIndex)?.Name ?? plugin.Catalog.WeaponName(defIndex);
 
-	private static List<StickerEntry> MapStickers(List<EconSticker> source)
-	{
-		const int slots = 6;
-		var result = new List<StickerEntry>();
-		var used = new bool[slots];
-		var nextFree = 0;
-		var nextZero = 4;
+	private static List<StickerEntry> MapStickers(List<EconSticker> source) => CosmeticRules.MapStickers(source);
 
-		foreach (var sticker in source)
-		{
-			if (sticker.Id <= 0 || sticker.Slot < 0 || sticker.Slot > 31 || result.Count >= 5)
-				continue;
-
-			var origin = sticker.Slot;
-			var slot = origin;
-			var schema = 0;
-
-			if (origin >= slots || used[origin])
-			{
-				schema = origin;
-
-				if (origin == 0)
-				{
-					while (nextZero < slots && used[nextZero])
-						nextZero++;
-
-					slot = nextZero < slots ? nextZero++ : TakeFreeSlot(used, ref nextFree);
-				}
-				else
-				{
-					slot = TakeFreeSlot(used, ref nextFree);
-				}
-
-				if (slot < 0)
-					continue;
-			}
-			else if (origin >= 4)
-			{
-				schema = origin;
-			}
-
-			used[slot] = true;
-			result.Add(new StickerEntry
-			{
-				Slot = slot,
-				Id = sticker.Id,
-				Wear = sticker.Wear,
-				Scale = sticker.Scale == 0f ? 1f : sticker.Scale,
-				Rotation = sticker.Rotation,
-				OffsetX = sticker.OffsetX,
-				OffsetY = sticker.OffsetY,
-				Schema = schema
-			});
-		}
-
-		return result;
-	}
-
-	private static int TakeFreeSlot(bool[] used, ref int cursor)
-	{
-		while (cursor < used.Length && used[cursor])
-			cursor++;
-		return cursor < used.Length ? cursor++ : -1;
-	}
-
-	private static CharmEntry? MapCharm(List<EconSticker> keychains)
-	{
-		var charm = keychains.FirstOrDefault(k => k.Id > 0);
-		if (charm == null)
-			return null;
-
-		return new CharmEntry
-		{
-			Id = charm.Id,
-			Pattern = charm.Pattern,
-			Sticker = charm.Sticker,
-			Highlight = charm.Highlight,
-			OffsetX = charm.OffsetX,
-			OffsetY = charm.OffsetY,
-			OffsetZ = charm.OffsetZ
-		};
-	}
+	private static CharmEntry? MapCharm(List<EconSticker> keychains) => CosmeticRules.MapCharm(keychains);
 
 	private static StickerEntry Clone(StickerEntry source) => new()
 	{
@@ -698,13 +618,19 @@ public sealed class Commands
 		}
 
 		var slot = caller?.Slot ?? -1;
+		var steamId = caller?.SteamID ?? 0;
+		var cancellationToken = plugin.LifetimeToken;
 		Task.Run(async () =>
 		{
 			var loaded = false;
 			try
 			{
-				await plugin.Catalog.LoadAsync(plugin.Config.Api, plugin.Db.Configured);
+				await plugin.Catalog.LoadAsync(plugin.Config.Api, plugin.Db.Configured, cancellationToken);
 				loaded = plugin.Catalog.Loaded;
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				return;
 			}
 			catch (Exception ex)
 			{
@@ -713,10 +639,10 @@ public sealed class Commands
 
 			Server.NextFrame(() =>
 			{
-				plugin.Menus.InvalidateCaches();
-				plugin.Menus.Prewarm();
+				if (plugin.Stopping || cancellationToken.IsCancellationRequested)
+					return;
 				var player = slot >= 0 ? Utilities.GetPlayerFromSlot(slot) : null;
-				if (player != null && player.IsValid)
+				if (player != null && player.IsValid && player.SteamID == steamId)
 					plugin.Reply(player, loaded ? "reloaded" : "reload_failed");
 				else
 					plugin.Logger.LogInformation(loaded ? "Item data reloaded" : "Item data reload failed");

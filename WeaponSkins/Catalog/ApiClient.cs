@@ -9,15 +9,17 @@ public sealed class ApiClient : IDisposable
 	private readonly string? language;
 	private readonly string? dataDirectory;
 	private readonly HttpClient? http;
+	private readonly TimeSpan requestTimeout;
 
 	public ApiClient(ApiConfig config)
 	{
 		baseUrl = config.BaseUrl.TrimEnd('/');
 		language = string.IsNullOrWhiteSpace(config.Language) ? "en" : config.Language;
-		// The catalog is ~26 MB of JSON; accepting gzip/brotli cuts the download to a few MB.
+		requestTimeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds));
+		// Compress the large catalog download.
 		http = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.All })
 		{
-			Timeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds))
+			Timeout = Timeout.InfiniteTimeSpan
 		};
 		http.DefaultRequestHeaders.UserAgent.ParseAdd("WeaponSkins");
 	}
@@ -27,16 +29,22 @@ public sealed class ApiClient : IDisposable
 		this.dataDirectory = dataDirectory;
 	}
 
-	public async Task<JsonDocument> Fetch(string file)
+	public async Task<JsonDocument> Fetch(string file, CancellationToken cancellationToken = default)
 	{
-		Stream stream;
 		if (dataDirectory != null)
-			stream = File.OpenRead(Path.Combine(dataDirectory, $"{file}.json"));
-		else
-			stream = await http!.GetStreamAsync($"{baseUrl}/{language}/{file}.json");
+		{
+			await using var local = File.OpenRead(Path.Combine(dataDirectory, $"{file}.json"));
+			return await JsonDocument.ParseAsync(local, cancellationToken: cancellationToken);
+		}
 
-		await using (stream)
-			return await JsonDocument.ParseAsync(stream);
+		// Keep the timeout active while reading and parsing the response.
+		using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		deadline.CancelAfter(requestTimeout);
+		using var response = await http!.GetAsync($"{baseUrl}/{language}/{file}.json",
+			HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+		response.EnsureSuccessStatusCode();
+		await using var stream = await response.Content.ReadAsStreamAsync(deadline.Token);
+		return await JsonDocument.ParseAsync(stream, cancellationToken: deadline.Token);
 	}
 
 	public void Dispose()

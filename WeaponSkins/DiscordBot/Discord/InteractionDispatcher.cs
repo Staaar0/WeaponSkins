@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 
 namespace WeaponSkinsBot.Discord;
 
-/// <summary>Gateway callbacks return immediately. Work is bounded, observed, and drained on shutdown.</summary>
+// Runs callbacks in the background and waits for them during shutdown.
 internal sealed class InteractionDispatcher(ILogger logger, CancellationToken cancellationToken)
 {
     private readonly object sync = new();

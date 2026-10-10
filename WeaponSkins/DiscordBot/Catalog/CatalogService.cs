@@ -27,10 +27,7 @@ public sealed class CatalogService : IDisposable
     public IReadOnlyDictionary<int, string> WeaponNames { get; private set; } = new Dictionary<int, string>();
     public IReadOnlyDictionary<int, TeamTarget> WeaponTeams { get; private set; } = new Dictionary<int, TeamTarget>();
 
-    /// <summary>
-    /// Which side can actually hold this weapon, straight from the item data.
-    /// Both for anything either side can buy.
-    /// </summary>
+    // Returns the weapon's team, or Both if either team can use it.
     public TeamTarget TeamOf(int defIndex) => WeaponTeams.TryGetValue(defIndex, out var team) ? team : TeamTarget.Both;
 
 	public CatalogService(string cacheDirectory, string fallbackDirectory, global::WeaponSkins.ApiConfig config)
@@ -131,24 +128,109 @@ public sealed class CatalogService : IDisposable
 	private async Task<JsonDocument> Fetch(string name, CancellationToken cancellationToken)
 	{
 		var path = Path.Combine(cacheDirectory, $"{name}.json");
+		var errors = new List<Exception>();
+		JsonDocument? downloaded = null;
 		try
 		{
 			var bytes = await http.GetByteArrayAsync($"{baseUrl}/{name}.json", cancellationToken);
-			await File.WriteAllBytesAsync(path, bytes, cancellationToken);
-			return JsonDocument.Parse(bytes);
+			downloaded = ParseCatalog(name, bytes);
+			await SaveCacheAsync(path, bytes, cancellationToken);
+			return downloaded;
 		}
 		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 		{
+			downloaded?.Dispose();
 			throw;
 		}
-		catch when (File.Exists(path))
+		catch (Exception ex)
 		{
-			return JsonDocument.Parse(await File.ReadAllBytesAsync(path, cancellationToken));
+			downloaded?.Dispose();
+			errors.Add(ex);
 		}
-		catch when (File.Exists(Path.Combine(fallbackDirectory, $"{name}.json")))
+
+		foreach (var localPath in new[] { path, Path.Combine(fallbackDirectory, $"{name}.json") })
 		{
-			return JsonDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fallbackDirectory, $"{name}.json"), cancellationToken));
+			try
+			{
+				return ParseCatalog(name, await File.ReadAllBytesAsync(localPath, cancellationToken));
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+			catch (Exception ex) { errors.Add(ex); }
 		}
+		throw new AggregateException($"Unable to load the {name} catalog from the API, cache, or bundled data.", errors);
+	}
+
+	private static async Task SaveCacheAsync(string path, byte[] bytes, CancellationToken cancellationToken)
+	{
+		var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+		try
+		{
+			await File.WriteAllBytesAsync(temporaryPath, bytes, cancellationToken);
+			cancellationToken.ThrowIfCancellationRequested();
+			File.Move(temporaryPath, path, overwrite: true);
+		}
+		catch (IOException) { /* Keep the downloaded catalog if caching fails. */ }
+		catch (UnauthorizedAccessException) { }
+		finally
+		{
+			try { File.Delete(temporaryPath); }
+			catch (IOException) { }
+			catch (UnauthorizedAccessException) { }
+		}
+	}
+
+	private static JsonDocument ParseCatalog(string name, byte[] bytes)
+	{
+		var document = JsonDocument.Parse(bytes);
+		try
+		{
+			if (document.RootElement.ValueKind != JsonValueKind.Array)
+				throw new JsonException($"The {name} catalog must be an array.");
+			foreach (var item in document.RootElement.EnumerateArray())
+			{
+				if (item.ValueKind != JsonValueKind.Object)
+					throw new JsonException($"The {name} catalog contains a non-object item.");
+				if (name == "skins")
+				{
+					if (!item.TryGetProperty("category", out var category) || category.ValueKind != JsonValueKind.Object ||
+						!item.TryGetProperty("weapon", out var weapon) || weapon.ValueKind != JsonValueKind.Object ||
+						!weapon.TryGetProperty("weapon_id", out var id) || id.ValueKind != JsonValueKind.Number || !id.TryGetInt32(out _))
+						throw new JsonException("A skin is missing its category or numeric weapon ID.");
+					ValidateStringField(item, "paint_index");
+					ReadWearRange(item);
+				}
+				else if (name is "music_kits" or "collectibles" or "stickers" or "keychains")
+					ValidateStringField(item, "def_index");
+			}
+			return document;
+		}
+		catch
+		{
+			document.Dispose();
+			throw;
+		}
+	}
+
+	private static void ValidateStringField(JsonElement item, string name)
+	{
+		if (item.TryGetProperty(name, out var value) && value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+			throw new JsonException($"Catalog field {name} must be a string.");
+	}
+
+	private static (float Minimum, float Maximum) ReadWearRange(JsonElement skin)
+	{
+		float Read(string name, float fallback)
+		{
+			if (!skin.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return fallback;
+			if (value.ValueKind != JsonValueKind.Number || !value.TryGetSingle(out var number) || !float.IsFinite(number))
+				throw new JsonException($"Catalog field {name} must be a finite number.");
+			return number;
+		}
+		var minimum = Read("min_float", 0f);
+		var maximum = Read("max_float", 1f);
+		if (minimum < 0f || maximum > 1f || minimum > maximum)
+			throw new JsonException("A skin has an invalid wear range.");
+		return (minimum, maximum);
 	}
 
     private void ParseSkins(JsonElement root)
@@ -196,11 +278,10 @@ public sealed class CatalogService : IDisposable
             if (skin.TryGetProperty("phase", out var phase) && phase.ValueKind == JsonValueKind.String)
                 paintName = $"{paintName} ({phase.GetString()})";
 
-            var minFloat = skin.TryGetProperty("min_float", out var min) && min.ValueKind == JsonValueKind.Number ? min.GetSingle() : 0f;
-            var maxFloat = skin.TryGetProperty("max_float", out var max) && max.ValueKind == JsonValueKind.Number ? max.GetSingle() : 1f;
+            var (minFloat, maxFloat) = ReadWearRange(skin);
             var image = ReadString(skin, "image");
 
-            // A weapon only one side can buy never needs a team question.
+            // Skip the team choice for weapons available to one team.
             var side = skin.TryGetProperty("team", out var teamObj) && teamObj.ValueKind == JsonValueKind.Object
                 ? ReadString(teamObj, "id") : "";
             var weaponTeam = side switch

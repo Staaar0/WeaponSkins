@@ -15,8 +15,11 @@ public sealed class ProfileService
 	private readonly Dictionary<int, ushort> originalMusic = [];
 	private readonly Dictionary<int, MedalRank_t> originalPin = [];
 	private readonly Dictionary<int, int> agentRevisions = [];
+	private readonly Dictionary<int, AppliedAgent> appliedAgents = [];
 	private readonly Dictionary<int, int> profileRevisions = [];
 	private bool reassertStarted;
+
+	private readonly record struct AppliedAgent(ulong SteamId, uint PawnHandle, string Model);
 
 	public ProfileService(WeaponSkins plugin, PlayerCache cache)
 	{
@@ -26,7 +29,7 @@ public sealed class ProfileService
 
 	public void Start()
 	{
-		if (reassertStarted)
+		if (plugin.Stopping || reassertStarted)
 			return;
 
 		reassertStarted = true;
@@ -50,19 +53,29 @@ public sealed class ProfileService
 	{
 		originalMusic.Remove(slot);
 		originalPin.Remove(slot);
-		agentRevisions[slot] = agentRevisions.GetValueOrDefault(slot) + 1;
+		ResetAgent(slot);
 		profileRevisions[slot] = profileRevisions.GetValueOrDefault(slot) + 1;
+	}
+
+	public void ResetAgent(int slot)
+	{
+		agentRevisions[slot] = agentRevisions.GetValueOrDefault(slot) + 1;
+		appliedAgents.Remove(slot);
 	}
 
 	public void DropAll()
 	{
+		foreach (var slot in agentRevisions.Keys.ToList())
+			agentRevisions[slot] = agentRevisions[slot] + 1;
+		appliedAgents.Clear();
+
 		foreach (var slot in profileRevisions.Keys.ToList())
 			profileRevisions[slot] = profileRevisions[slot] + 1;
 	}
 
 	public void Schedule(CCSPlayerController player, params float[] delays)
 	{
-		if (!player.IsValid || player.IsBot)
+		if (plugin.Stopping || !player.IsValid || player.IsBot)
 			return;
 
 		var slot = player.Slot;
@@ -77,7 +90,7 @@ public sealed class ProfileService
 		{
 			plugin.AddTimer(delay, () =>
 			{
-				if (profileRevisions.GetValueOrDefault(slot) != revision)
+				if (plugin.Stopping || profileRevisions.GetValueOrDefault(slot) != revision)
 					return;
 
 				var current = Utilities.GetPlayerFromSlot(slot);
@@ -93,42 +106,102 @@ public sealed class ProfileService
 		}
 	}
 
-	public void ApplyAgent(CCSPlayerController player)
+	public void ApplyAgent(CCSPlayerController player, bool applyGloves = false)
 	{
+		if (plugin.Stopping)
+			return;
+
 		var playerRef = PlayerRef.Capture(player);
 		var loadout = cache.Get(player);
 		if (playerRef == null || loadout == null)
 			return;
 
 		var model = loadout.For(player.Team).AgentModel;
-		if (string.IsNullOrEmpty(model))
+		if (string.IsNullOrEmpty(model) && !applyGloves)
 			return;
 
 		var slot = player.Slot;
+		var normalizedModel = NormalizeModel(model);
+		var pawn = player.PlayerPawn.Value;
+		if (!applyGloves && pawn != null && pawn.IsValid && IsAppliedAgent(player, pawn, normalizedModel))
+			return;
+
 		var revision = agentRevisions.GetValueOrDefault(slot) + 1;
 		agentRevisions[slot] = revision;
+		var updateGloves = applyGloves;
 		Server.NextFrame(() =>
 		{
-			if (agentRevisions.GetValueOrDefault(slot) != revision)
+			if (plugin.Stopping || agentRevisions.GetValueOrDefault(slot) != revision)
 				return;
 
 			var current = playerRef.Value.Resolve();
-			var pawn = current?.PlayerPawn.Value;
-			if (current == null || pawn == null || !pawn.IsValid)
+			var currentPawn = current?.PlayerPawn.Value;
+			if (current == null || currentPawn == null || !currentPawn.IsValid)
 				return;
 
-			pawn.SetModel(model);
 			var currentLoadout = cache.Get(current);
 			if (currentLoadout == null)
 				return;
-
-			var side = currentLoadout.For(current.Team);
-			if (side.GloveDef > 0 && side.GlovePaint > 0)
+			if (NormalizeModel(currentLoadout.For(current.Team).AgentModel) != normalizedModel)
 			{
-				pawn.AcceptInput("SetBodygroup", value: "default_gloves,1");
-				pawn.AcceptInput("SetBodygroup", value: "first_or_third_person,1");
+				if (applyGloves)
+					ApplyAgent(current, applyGloves: true);
+				return;
+			}
+
+			var modelChanged = !string.IsNullOrEmpty(model) && !IsAppliedAgent(current, currentPawn, normalizedModel);
+			if (modelChanged)
+			{
+				currentPawn.SetModel(model!);
+				appliedAgents[slot] = new AppliedAgent(current.SteamID, currentPawn.EntityHandle.Raw, normalizedModel);
+				updateGloves = true;
 			}
 		});
+
+		// Apply the agent model before gloves.
+		Server.NextFrame(() =>
+		{
+			if (plugin.Stopping || agentRevisions.GetValueOrDefault(slot) != revision || !updateGloves)
+				return;
+
+			var current = playerRef.Value.Resolve();
+			var currentLoadout = current == null ? null : cache.Get(current);
+			if (current == null || currentLoadout == null ||
+				NormalizeModel(currentLoadout.For(current.Team).AgentModel) != normalizedModel)
+				return;
+
+			plugin.GloveApply.Apply(current, false);
+		});
+	}
+
+	private bool IsAppliedAgent(CCSPlayerController player, CCSPlayerPawn pawn, string model)
+	{
+		if (!appliedAgents.TryGetValue(player.Slot, out var applied) ||
+			applied.SteamId != player.SteamID || applied.PawnHandle != pawn.EntityHandle.Raw || applied.Model != model)
+			return false;
+
+		var body = pawn.CBodyComponent;
+		if (body == null || body.Handle == IntPtr.Zero)
+			return false;
+
+		var node = body.SceneNode;
+		if (node == null || node.Handle == IntPtr.Zero)
+			return false;
+
+		var skeleton = node.GetSkeletonInstance();
+		if (skeleton == null || skeleton.Handle == IntPtr.Zero)
+			return false;
+
+		var modelState = skeleton.ModelState;
+		return modelState != null && modelState.Handle != IntPtr.Zero && NormalizeModel(modelState.ModelName) == model;
+	}
+
+	private static string NormalizeModel(string? model)
+	{
+		if (string.IsNullOrEmpty(model))
+			return string.Empty;
+
+		return model.EndsWith(".vmdl_c", StringComparison.Ordinal) ? model[..^2] : model;
 	}
 
 	public bool NeedsProfile(CCSPlayerController player)

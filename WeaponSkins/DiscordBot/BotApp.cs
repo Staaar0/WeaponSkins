@@ -20,6 +20,8 @@ public sealed partial class BotApp
 	private readonly Action connected;
     private readonly Action<ulong> loadoutChanged;
     private readonly Func<ulong, CancellationToken, Task<WeaponSkinsDatabase.Permissions>> livePermissions;
+    private readonly global::WeaponSkins.LoadoutStore? mutationStore;
+    private CancellationTokenSource? lifetime;
     private CancellationToken cancellationToken;
     private InteractionDispatcher dispatcher = null!;
     private readonly SemaphoreSlim botOperations = new(4, 4);
@@ -32,28 +34,26 @@ public sealed partial class BotApp
 	private ulong activeGuildId;
 	private bool extraGuildsLogged;
 
-    /// <summary>Servers whose slash commands have been written this run, so a reconnect
-    /// does not push them all again.</summary>
+    // Servers registered this run. Reconnects do not register them again.
     private readonly HashSet<ulong> commandGuilds = [];
 
     private readonly object commandGuildSync = new();
 
     private ApplicationCommandProperties[]? slashCommands;
 
-    /// <summary>Built once: the same set goes to the global registration and to each server.</summary>
     private ApplicationCommandProperties[] SlashCommands =>
         slashCommands ??= BuildSlashCommands().Select(builder => (ApplicationCommandProperties)builder.Build()).ToArray();
 
-    /// <summary>
-    /// Discord only lets an interaction reply privately, a plain message can never
-    /// be one. So a ! command posts a small opener that only the caller can press,
-    /// and the button reply is the private, dismissible one.
-    /// </summary>
+    // Prefix commands use a button to open a private reply for the caller.
     private sealed record Pending(ulong GuildId, ulong UserId, string Command, List<string> Args, DateTimeOffset CreatedAt);
 
     private sealed record Payload(string? Text, Embed? Embed, MessageComponent? Components);
 
     private readonly Dictionary<string, Pending> prompts = [];
+    private readonly HashSet<string> pendingOpeners = [];
+    private readonly HashSet<Task> openerCleanup = [];
+    private const int MaxOpeners = 512;
+    private static readonly TimeSpan OpenerLifetime = TimeSpan.FromMinutes(2);
     private readonly object promptSync = new();
 
 	private static readonly HashSet<string> KnownCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -65,14 +65,8 @@ public sealed partial class BotApp
         "stattrak", "st", "stickers", "sticker", "g", "gen"
     };
 
-    /// <summary>
-    /// Shown when the plugin says this player may not use stickers, either
-    /// because `vip_only` is on and they are not VIP, or because stickers are
-    /// switched off for the whole server.
-    /// </summary>
     private const string StickersDenied = "stickers are available only to VIP members.";
 
-    /// <summary>Shown when the plugin says this player may not use gen codes.</summary>
     private const string GenDenied = "Gen codes are available only to VIP members.";
 
 	public BotApp(
@@ -83,7 +77,8 @@ public sealed partial class BotApp
 		ILogger logger,
 		Action connected,
         Action<ulong> loadoutChanged,
-        Func<ulong, CancellationToken, Task<WeaponSkinsDatabase.Permissions>> livePermissions)
+        Func<ulong, CancellationToken, Task<WeaponSkinsDatabase.Permissions>> livePermissions,
+        global::WeaponSkins.LoadoutStore? mutationStore = null)
 	{
 		this.token = token;
 		sourceDatabase = database;
@@ -93,23 +88,25 @@ public sealed partial class BotApp
 		this.connected = connected;
         this.loadoutChanged = loadoutChanged;
         this.livePermissions = livePermissions;
+        this.mutationStore = mutationStore;
 	}
 
 	public async Task RunAsync(CancellationToken cancellationToken)
 	{
+		lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		this.cancellationToken = lifetime.Token;
 		try
 		{
-			this.cancellationToken = cancellationToken;
-            dispatcher = new InteractionDispatcher(logger, cancellationToken);
-            database = new WeaponSkinsDatabase(sourceDatabase, OnLoadoutChanged, cancellationToken, livePermissions);
+            dispatcher = new InteractionDispatcher(logger, this.cancellationToken);
+            database = new WeaponSkinsDatabase(sourceDatabase, OnLoadoutChanged, this.cancellationToken, livePermissions, mutationStore);
             ownedWeapons = new OwnedWeaponCache(database.GetOwnedWeaponsAsync,
-                ex => logger.LogWarning(ex, "WeaponSkinsBOT could not refresh weapon suggestions"), cancellationToken);
+                ex => logger.LogWarning(ex, "WeaponSkinsBOT could not refresh weapon suggestions"), this.cancellationToken);
 			catalog = new CatalogService(
 				Path.Combine(moduleDirectory, "BotData", "catalog"),
 				Path.Combine(moduleDirectory, "Data"),
 				apiConfig);
-			await catalog.LoadAsync(cancellationToken);
-			picker = new PickerService(catalog, database, cancellationToken, botOperations);
+			await catalog.LoadAsync(this.cancellationToken);
+			picker = new PickerService(catalog, database, this.cancellationToken, botOperations);
 
 			client = new DiscordSocketClient(new DiscordSocketConfig
 			{
@@ -129,9 +126,10 @@ public sealed partial class BotApp
 			client.ModalSubmitted += DispatchModal;
             client.AutocompleteExecuted += DispatchAutocomplete;
 
-			await client.LoginAsync(TokenType.Bot, token);
-			await client.StartAsync();
-			await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+			await client.LoginAsync(TokenType.Bot, token).WaitAsync(this.cancellationToken);
+			this.cancellationToken.ThrowIfCancellationRequested();
+			await client.StartAsync().WaitAsync(this.cancellationToken);
+			await Task.Delay(Timeout.InfiniteTimeSpan, this.cancellationToken);
 		}
 		finally
 		{
@@ -160,6 +158,15 @@ public sealed partial class BotApp
 		if (Interlocked.Exchange(ref shuttingDown, 1) != 0)
 			return;
 
+        lifetime?.Cancel();
+        var drained = dispatcher?.StopAsync() ?? Task.CompletedTask;
+        Task cleanup;
+        lock (promptSync)
+        {
+            prompts.Clear();
+            cleanup = Task.WhenAll(openerCleanup.ToArray());
+        }
+
 		if (client != null)
 		{
 			client.Log -= OnLog;
@@ -176,37 +183,36 @@ public sealed partial class BotApp
                 client.AutocompleteExecuted -= DispatchAutocomplete;
 			}
 
-			// Cancellation reaches SQL operations and session gates before disposal.
-            var drained = dispatcher?.StopAsync() ?? Task.CompletedTask;
-            await WithTimeout(drained);
-            await WithTimeout(client.StopAsync());
-			await WithTimeout(client.LogoutAsync());
-			if (drained.IsCompleted) client.Dispose();
-            else _ = drained.ContinueWith(_ => client.Dispose(), TaskScheduler.Default);
+			// Disconnect first; callbacks may be waiting for the game thread.
+            await WithTimeout(client.StopAsync(), TimeSpan.FromSeconds(2));
+            await WithTimeout(client.LogoutAsync(), TimeSpan.FromSeconds(1));
+			try { client.Dispose(); }
+            catch (Exception ex) { logger.LogWarning(ex, "WeaponSkinsBOT client disposal failed"); }
 		}
 
+		var allWork = Task.WhenAll(drained, cleanup, ownedWeapons?.StopAsync() ?? Task.CompletedTask);
+        await WithTimeout(allWork, TimeSpan.FromSeconds(2));
 		catalog?.Dispose();
+        if (allWork.IsCompleted) lifetime?.Dispose();
+        else _ = allWork.ContinueWith(_ => lifetime?.Dispose(), CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 	}
 
-	private static async Task WithTimeout(Task task)
+	private static async Task WithTimeout(Task task, TimeSpan timeout)
 	{
 		try
 		{
-			if (await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))) == task)
-				await task;
+			await task.WaitAsync(timeout);
 		}
 		catch
 		{
+            // Observe errors even if cleanup finishes after the timeout.
+            _ = task.ContinueWith(failed => _ = failed.Exception,
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
 		}
 	}
 
-    /// <summary>
-    /// Writes the commands straight to a server the moment the bot is added to it.
-    /// The global copy registered at startup is cached by Discord and can take up to an
-    /// hour to reach a client, which is why the commands only turned up after restarting
-    /// Discord. A guild copy is pushed immediately, and it shadows the global one of the
-    /// same name rather than showing twice.
-    /// </summary>
+    // Registers commands in the active server and removes them from other servers.
 	private async Task OnJoinedGuild(SocketGuild guild)
 	{
 		if (ClaimGuild(guild.Id))
@@ -229,11 +235,7 @@ public sealed partial class BotApp
 			await RegisterGuildCommands(replacement);
 	}
 
-    /// <summary>
-    /// Writes the commands straight to one server. Skips a server already done this run,
-    /// because Ready fires again on every reconnect and there is no reason to push the
-    /// same set repeatedly.
-    /// </summary>
+    // Registers commands once per server during this run.
     private async Task RegisterGuildCommands(SocketGuild guild)
     {
         lock (commandGuildSync)
@@ -244,12 +246,11 @@ public sealed partial class BotApp
 
         try
         {
-            await guild.BulkOverwriteApplicationCommandAsync(SlashCommands);
+            await guild.BulkOverwriteApplicationCommandAsync(SlashCommands, options: new RequestOptions { CancelToken = cancellationToken });
         }
         catch (Exception ex)
         {
-            // Let it be retried on the next reconnect, and note the global copy still
-            // arrives on its own once Discord's cache catches up.
+            // Retry registration on the next reconnect.
             lock (commandGuildSync)
                 commandGuilds.Remove(guild.Id);
 
@@ -261,7 +262,7 @@ public sealed partial class BotApp
 	{
 		try
 		{
-			await guild.BulkOverwriteApplicationCommandAsync([]);
+			await guild.BulkOverwriteApplicationCommandAsync([], options: new RequestOptions { CancelToken = cancellationToken });
 		}
 		catch (Exception ex)
 		{
@@ -273,15 +274,8 @@ public sealed partial class BotApp
     {
         if (Interlocked.Exchange(ref ready, 1) == 0)
         {
-            // Commands are registered per server, never globally. A global copy does not
-            // get replaced by the guild one, it sits beside it, so every command shows
-            // twice. Nothing is lost by dropping it: slash commands are refused outside a
-            // server anyway, and the per-server copy appears immediately instead of
-            // waiting on Discord's global cache.
-            //
-            // The empty overwrite clears a global set left by an older build. Without it
-            // those entries stay registered on Discord's side and the duplicates never go.
-            await client.BulkOverwriteGlobalApplicationCommandsAsync([]);
+            // Remove old global commands. Commands belong to the active server.
+            await client.BulkOverwriteGlobalApplicationCommandsAsync([], options: new RequestOptions { CancelToken = cancellationToken });
 			connected();
 		}
 
@@ -345,43 +339,75 @@ public sealed partial class BotApp
             return;
 
         var token = Guid.NewGuid().ToString("N")[..10];
+        var now = DateTimeOffset.UtcNow;
         lock (promptSync)
         {
-            foreach (var stale in prompts.Where(pair => pair.Value.CreatedAt < DateTimeOffset.UtcNow.AddMinutes(-10)).Select(pair => pair.Key).ToList())
+            foreach (var stale in prompts.Where(pair => now - pair.Value.CreatedAt >= OpenerLifetime).Select(pair => pair.Key).ToArray())
                 prompts.Remove(stale);
-            prompts[token] = new Pending(guildChannel.Guild.Id, message.Author.Id, command, args, DateTimeOffset.UtcNow);
+            // Count used prompts until their cleanup finishes.
+            if (pendingOpeners.Count >= MaxOpeners || cancellationToken.IsCancellationRequested)
+                return;
+            pendingOpeners.Add(token);
+            prompts[token] = new Pending(guildChannel.Guild.Id, message.Author.Id, command, args, now);
         }
 
         try
         {
-            await message.DeleteAsync();
+            try
+            {
+                await message.DeleteAsync(options: new RequestOptions { CancelToken = cancellationToken });
+            }
+            catch when (!cancellationToken.IsCancellationRequested)
+            {
+                // Without Manage Messages permission, the command stays visible.
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var opener = await message.Channel.SendMessageAsync(
+                embed: new EmbedBuilder()
+                    .WithTitle("WeaponSkins")
+                    .WithDescription($"{message.Author.Mention} press **Open** for `!{command}`. Only you will see it.")
+                    .WithFooter(Branding)
+                    .Build(),
+                components: new ComponentBuilder().WithButton("Open", $"open:{token}", ButtonStyle.Primary).Build(),
+                options: new RequestOptions { CancelToken = cancellationToken });
+
+            var cleanup = ExpireOpener(token, opener);
+            lock (promptSync) openerCleanup.Add(cleanup);
+            _ = cleanup.ContinueWith(completed =>
+            {
+                lock (promptSync) openerCleanup.Remove(completed);
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
         catch
         {
-            // No Manage Messages permission, the command stays in the channel.
+            lock (promptSync)
+            {
+                prompts.Remove(token);
+                pendingOpeners.Remove(token);
+            }
+            throw;
         }
-
-        var opener = await message.Channel.SendMessageAsync(
-            embed: new EmbedBuilder()
-                .WithTitle("WeaponSkins")
-                .WithDescription($"{message.Author.Mention} press **Open** for `!{command}`. Only you will see it.")
-				.WithFooter(Branding)
-                .Build(),
-            components: new ComponentBuilder().WithButton("Open", $"open:{token}", ButtonStyle.Primary).Build());
-
-        _ = ExpireOpener(opener);
     }
 
-    private async Task ExpireOpener(IUserMessage opener)
+    private async Task ExpireOpener(string token, IUserMessage opener)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromMinutes(2), cancellationToken);
-            await opener.DeleteAsync();
+            await Task.Delay(OpenerLifetime, cancellationToken);
+            await opener.DeleteAsync(options: new RequestOptions { CancelToken = cancellationToken });
         }
         catch
         {
-            // Already gone, nothing to clean up.
+            // The prompt was removed, or the bot is stopping.
+        }
+        finally
+        {
+            lock (promptSync)
+            {
+                prompts.Remove(token);
+                pendingOpeners.Remove(token);
+            }
         }
     }
 
@@ -408,10 +434,9 @@ public sealed partial class BotApp
             ephemeral: true);
     }
 
-    /// <summary>Runs a ! command and hands back whatever should be shown privately.</summary>
 	private async Task<Payload> BuildPayload(ulong guildId, ulong userId, string command, List<string> args)
     {
-        // Callers acknowledge first; database concurrency cannot delay Discord's first response.
+        // Reply before waiting for database access.
         await botOperations.WaitAsync(cancellationToken);
         try { return await BuildPayloadCore(guildId, userId, command, args); }
         finally { botOperations.Release(); }
@@ -429,7 +454,7 @@ public sealed partial class BotApp
             {
                 if (args.Count < 1)
                     return Say("Usage: `!link ABCD-1234`, using the code `!link` gives you inside the CS2 server.");
-				// Codes are short lived, this makes guessing them pointless as well.
+				// Limit link attempts while the code is valid.
                 var wait = LinkCooldown(userId);
                 if (wait > 0)
                     return Say($"Too many link attempts. Wait {wait} seconds and try again.");
@@ -568,8 +593,7 @@ public sealed partial class BotApp
                 if (!SharedEconPreview.TryParse(string.Join(" ", args), out var item))
                     return Say("Invalid inspect code.");
 
-                // Two separate rules in the plugin: whether gen may be used at all,
-                // and whether the stickers on the craft come with it.
+                // Check gen-code access and sticker access separately.
                 var allowed = await context.Db.PermissionsAsync(context.SteamId);
                 if (!allowed.Gen)
                     return Say(GenDenied);
@@ -584,6 +608,7 @@ public sealed partial class BotApp
     }
 
     private readonly Dictionary<ulong, List<DateTimeOffset>> linkAttempts = [];
+    private DateTimeOffset nextLinkPrune;
 
     private int LinkCooldown(ulong userId)
     {
@@ -593,8 +618,19 @@ public sealed partial class BotApp
 
         lock (promptSync)
         {
+            if (now >= nextLinkPrune || linkAttempts.Count >= 1024)
+            {
+                foreach (var expired in linkAttempts.Where(pair => pair.Value.Count == 0 || now - pair.Value[^1] >= window).Select(pair => pair.Key).ToArray())
+                    linkAttempts.Remove(expired);
+                nextLinkPrune = now.Add(window);
+            }
             if (!linkAttempts.TryGetValue(userId, out var recent))
+            {
+                // Keep active cooldowns so repeated guesses cannot reset them.
+                if (linkAttempts.Count >= 1024)
+                    return (int)window.TotalSeconds;
                 linkAttempts[userId] = recent = [];
+            }
 
             recent.RemoveAll(stamp => now - stamp > window);
             if (recent.Count >= limit)
@@ -609,7 +645,6 @@ public sealed partial class BotApp
 
     private static Payload View(PickerView view) => new(null, view.Embed, view.Components);
 
-    /// <summary>Pulls a team word out of the arguments wherever the player put it.</summary>
     private static TeamTarget TakeTeam(List<string> args, TeamTarget fallback)
     {
         for (var i = 0; i < args.Count; i++)
@@ -640,7 +675,7 @@ public sealed partial class BotApp
         return 0;
     }
 
-    /// <summary>A weapon only one side can carry never needs the team asking.</summary>
+    // Skips the team choice for weapons available to one team.
     private TeamTarget TeamFor(WeaponDef weapon, TeamTarget requested)
     {
         var fixedTeam = catalog.TeamOf(weapon.DefIndex);
@@ -649,7 +684,6 @@ public sealed partial class BotApp
 
     private const int LoadoutPageSize = 18;
 
-    /// <summary>The whole loadout, paged, so nothing hides behind "and N more".</summary>
     private async Task<Payload> LoadoutPayload(Linked context, int page)
     {
         var data = await context.Db.GetLoadoutAsync(context.SteamId);
@@ -718,7 +752,7 @@ public sealed partial class BotApp
         return entries;
     }
 
-    /// <summary>Chunks lines, repeating a heading when its section runs onto the next page.</summary>
+    // Splits lines into pages and repeats section headings.
     private static List<List<string>> Paginate(List<(string Section, string Line)> entries, int perPage)
     {
         var pages = new List<List<string>>();
@@ -768,7 +802,7 @@ public sealed partial class BotApp
 
         try
         {
-            // Slash and ! run the exact same code, so the two can never drift apart.
+            // Use the same handler for slash and prefix commands.
             var args = command.CommandName switch
             {
                 "skins" or "skin" => SlashArgs(command, "category", "team"),
@@ -783,8 +817,7 @@ public sealed partial class BotApp
                 _ => []
             };
 
-            // A gen code or a skin write is a full MySQL transaction, which can take
-            // longer than the three seconds Discord allows for a first answer.
+            // Defer before saving; Discord allows only three seconds for the first reply.
             await command.DeferAsync(ephemeral: true);
 
             var payload = await BuildPayload(guildId, command.User.Id, command.CommandName, args);
@@ -797,6 +830,7 @@ public sealed partial class BotApp
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
+            if (cancellationToken.IsCancellationRequested) return;
             logger.LogError(ex, "WeaponSkinsBOT slash command {Command} failed", command.CommandName);
             var error = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.";
             if (command.HasResponded)
@@ -863,6 +897,11 @@ public sealed partial class BotApp
             lock (promptSync)
             {
                 prompts.TryGetValue(token, out job);
+                if (job != null && DateTimeOffset.UtcNow - job.CreatedAt >= OpenerLifetime)
+                {
+                    prompts.Remove(token);
+                    job = null;
+                }
                 if (job != null && job.UserId == component.User.Id)
                     prompts.Remove(token);
             }
@@ -886,7 +925,7 @@ public sealed partial class BotApp
             }
             catch
             {
-                // The opener is already gone or cannot be deleted here.
+                // The prompt is gone or cannot be deleted.
             }
             return;
         }
@@ -920,13 +959,13 @@ public sealed partial class BotApp
         if (args.Count < 2)
             return false;
 
-        // The final argument is a value, even when it is 0, 2, 3 or a team word in a nametag.
+        // Treat the last argument as the value, even if it looks like a team.
         value = args[^1];
         var weaponArgs = args.Take(args.Count - 1).ToList();
         weapon = catalog.FindAnyWeapon(string.Join(" ", weaponArgs))!;
         if (weapon != null) return true;
 
-        // Resolve a complete weapon first so numeric weapon IDs cannot be consumed as teams.
+        // Resolve the weapon before checking for a numeric team.
         for (var i = weaponArgs.Count - 1; weaponArgs.Count > 1 && i >= 0; i--)
         {
             if (!TeamTargetExtensions.TryParse(weaponArgs[i], out var parsed)) continue;
@@ -935,7 +974,7 @@ public sealed partial class BotApp
             team = parsed;
             return true;
         }
-        // Preserve prefix-command callers that put the optional team after the value.
+        // Also accept the optional team after the value.
         if (args.Count > 2 && TeamTargetExtensions.TryParse(args[^1], out var trailingTeam))
         {
             weapon = catalog.FindAnyWeapon(string.Join(" ", args.Take(args.Count - 2)))!;

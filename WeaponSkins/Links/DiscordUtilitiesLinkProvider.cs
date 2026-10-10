@@ -36,8 +36,7 @@ public sealed class DiscordUtilitiesLinkProvider
 		return true;
 	}
 
-	// GetLinkedPlayers returns a fresh copy of every link on the Discord server, so a sync
-	// pass fetches it once and checks all online players against that one copy.
+	// Fetch links once per sync pass, then check all online players.
 	public bool TryGetLinkedPlayers(out IDictionary players)
 	{
 		players = null!;

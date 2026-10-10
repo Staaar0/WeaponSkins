@@ -58,13 +58,16 @@ public sealed class LinkService
 			Server.NextWorldUpdate(SyncDiscordUtilities);
 	}
 
-	public void Stop()
+	public void RequestStop() => cancellation?.Cancel();
+
+	public async Task StopAsync(CancellationToken cancellationToken = default)
 	{
-		cancellation?.Cancel();
+		RequestStop();
 
 		try
 		{
-			loop?.GetAwaiter().GetResult();
+			if (loop != null)
+				await loop.WaitAsync(cancellationToken);
 		}
 		catch (OperationCanceledException)
 		{
@@ -107,8 +110,7 @@ public sealed class LinkService
 				online.Add(steamId);
 
 			SyncDiscordUtilities(steamId);
-			// Link state is kept across map changes, so Complete() will not fetch
-			// again. Fetch is a no-op while the loadout is cached or loading.
+			// Links survive map changes. Fetch only if the loadout is missing.
 			if (IsLinked(steamId))
 				plugin.Cache.Fetch(steamId);
 			return;
@@ -145,7 +147,7 @@ public sealed class LinkService
 		}
 	}
 
-	// Unlinked players get the link reminder again on every new map.
+	// Show the link reminder again on each map.
 	public void ResetNotices()
 	{
 		lock (sync)
@@ -185,7 +187,7 @@ public sealed class LinkService
 
 	private async Task Issue(ulong steamId)
 	{
-		var token = cancellation?.Token ?? CancellationToken.None;
+		var token = plugin.LifetimeToken;
 		try
 		{
 			for (var attempt = 0; attempt < CodeAttempts; attempt++)
@@ -236,7 +238,7 @@ public sealed class LinkService
 
 	private async Task Resolve(ulong steamId)
 	{
-		var token = cancellation?.Token ?? CancellationToken.None;
+		var token = plugin.LifetimeToken;
 		try
 		{
 			if (await store.IsLinked(steamId, token))
@@ -293,8 +295,7 @@ public sealed class LinkService
 		plugin.Reply(player, "link_success");
 	}
 
-	// A Discord save wakes the existing sync loop so the new skin can be
-	// applied without waiting for its next periodic database poll.
+	// Wake the sync loop after a Discord save.
 	public void WakeSync(ulong steamId)
 	{
 		lock (sync)
@@ -319,7 +320,8 @@ public sealed class LinkService
 				{
 					await Task.Delay(75, cancellationToken);
 					while (syncWake.Wait(0)) { }
-					await Drain(cancellationToken);
+					if (plugin.Db.Configured)
+						await Drain(cancellationToken);
 				}
 				if (Environment.TickCount64 < nextTick)
 					continue;
@@ -334,10 +336,10 @@ public sealed class LinkService
 				if (CanIssueCodes)
 					await Detect(tick % SweepEveryTicks == 0 ? Unlinked() : Pending(), cancellationToken);
 
-				if (!woke && tick % SyncEveryTicks == 0)
+				if (plugin.Db.Configured && !woke && tick % SyncEveryTicks == 0)
 					await Drain(cancellationToken);
 
-				if (tick % MaintenanceEveryTicks == 0)
+				if (plugin.Db.Configured && tick % MaintenanceEveryTicks == 0)
 					await Maintain(cancellationToken);
 			}
 			catch (OperationCanceledException)
@@ -351,8 +353,7 @@ public sealed class LinkService
 		}
 	}
 
-	// Runs every second on the game thread: one copy of the link table and one pass over
-	// the player slots, instead of both for every online player.
+	// Check links once per second with one pass over player slots.
 	private void SyncDiscordUtilities()
 	{
 		if (plugin.Stopping || discordUtilities == null)
@@ -435,6 +436,8 @@ public sealed class LinkService
 
 	private async Task Drain(CancellationToken cancellationToken)
 	{
+		if (!plugin.Db.Configured)
+			return;
 		var players = Online();
 		if (players.Count == 0)
 			return;
@@ -443,30 +446,58 @@ public sealed class LinkService
 		if (rows.Count == 0)
 			return;
 
-		await store.DeleteSync(rows.ConvertAll(row => row.Id), cancellationToken);
-
 		var steamIds = rows.Select(row => row.SteamId).Distinct().ToList();
-		Server.NextFrame(() =>
+		var refreshed = new HashSet<ulong>();
+		foreach (var steamId in steamIds)
 		{
-			foreach (var steamId in steamIds)
-				Refresh(steamId);
-		});
+			if (await Refresh(steamId, cancellationToken))
+				refreshed.Add(steamId);
+		}
+		// Keep pending changes until the loadout reload succeeds.
+		await store.DeleteSync(rows.Where(row => refreshed.Contains(row.SteamId)).Select(row => row.Id).ToList(), cancellationToken);
 	}
 
-	private void Refresh(ulong steamId)
+	private async Task<bool> Refresh(ulong steamId, CancellationToken cancellationToken)
 	{
 		if (plugin.Stopping || (Required && !IsLinked(steamId)))
-			return;
+			return false;
 
-		// The sync row is already deleted, so reload even while the player is
-		// still loading the next map, otherwise this change would be lost.
-		var player = Player(steamId);
-		if (player != null)
-			plugin.Menu.Close(player);
-		plugin.Save(plugin.Store.FlushStatTrak(steamId));
-		plugin.Cache.Reload(steamId);
-		if (player != null)
-			plugin.Reply(player, "loadout_synced");
+		using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, plugin.LifetimeToken);
+		var token = cancellation.Token;
+		await plugin.Store.FlushStatTrak(steamId, token);
+		var reload = await Server.NextWorldUpdateAsync(() =>
+		{
+			token.ThrowIfCancellationRequested();
+			if (plugin.Stopping || (Required && !IsLinked(steamId)))
+				return Task.FromResult(false);
+			lock (sync)
+			{
+				if (!online.Contains(steamId))
+					return Task.FromResult(false);
+			}
+			// Reload the cache during map changes, even if the player has no pawn.
+			var player = Player(steamId);
+			if (player != null)
+				plugin.Menu.Close(player);
+			return plugin.Cache.ReloadAsync(steamId, token);
+		}).WaitAsync(token);
+		if (!await reload.WaitAsync(token))
+			return false;
+
+		return await Server.NextWorldUpdateAsync(() =>
+		{
+			token.ThrowIfCancellationRequested();
+			if (plugin.Stopping || (Required && !IsLinked(steamId)) || plugin.Cache.Get(steamId) == null)
+				return false;
+			lock (sync)
+			{
+				if (!online.Contains(steamId))
+					return false;
+			}
+			if (Player(steamId) is { } player)
+				plugin.Reply(player, "loadout_synced");
+			return true;
+		}).WaitAsync(token);
 	}
 
 	private async Task Maintain(CancellationToken cancellationToken)

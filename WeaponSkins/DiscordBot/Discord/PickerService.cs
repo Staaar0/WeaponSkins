@@ -8,7 +8,7 @@ namespace WeaponSkinsBot.Discord;
 
 public sealed record PickerView(Embed? Embed, MessageComponent Components);
 
-/// <summary>Owner-bound, expiring menus. Preview edits are local; Save writes one complete build.</summary>
+// Menus belong to one user and expire. Save applies the full build.
 public sealed partial class PickerService
 {
     private enum Stage { Categories, Weapons, Paints, Preview, Agents, Music, Pins, Slots, Stickers, Unlink }
@@ -57,7 +57,7 @@ public sealed partial class PickerService
         {
             foreach (var id in sessions.Where(x => x.Value.Expires <= DateTimeOffset.UtcNow).Select(x => x.Key).ToArray())
                 sessions.Remove(id);
-            // Bound retained menus even when users repeatedly open commands without dismissing them.
+            // Limit open menus, including ones users leave open.
             if (sessions.Count >= 512)
                 foreach (var id in sessions.OrderBy(x => x.Value.Expires).Take(64).Select(x => x.Key).ToArray())
                     sessions.Remove(id);
@@ -97,7 +97,7 @@ public sealed partial class PickerService
     {
         var s = New(guild, user, steam, team, slot == 0 ? Stage.Slots : Stage.Stickers);
         s.DefIndex = def; s.Filter = filter;
-        // The prefix parser uses 0 for "ask", 1..4 for slots, -1 for all.
+        // Slots: 0 asks, 1-4 selects a slot, -1 selects all.
         s.Slots = slot < 0 ? Enumerable.Range(0, StickerSlots).ToArray() : slot > 0 ? [slot - 1] : [];
         return Start(s);
     }
@@ -133,7 +133,7 @@ public sealed partial class PickerService
         }
         var value = select ? component.Data.Values.FirstOrDefault() ?? "" : "";
         var modal = action is "search" or "seed" or "tag" || action == "wear" && value == "custom";
-        // A modal is itself the acknowledgement; never defer before opening one.
+        // Opening a modal is the reply, so do not defer first.
         if (modal)
         {
             if (!await s.Gate.WaitAsync(0, cancellationToken))
@@ -307,7 +307,7 @@ public sealed partial class PickerService
                 var side = s.Team == TeamTarget.CounterTerrorist ? 3 : 2;
                 var agent = action == "default" ? null : (side == 3 ? catalog.AgentsCT : catalog.AgentsT)[int.Parse(value[6..])];
                 await database.SetAgentAsync(s.SteamId, side, agent);
-                // Preserve the prefix command's existing Both flow (T first, then CT).
+                // For Both, handle T first, then CT.
                 if (s.Team == TeamTarget.Both) { s.Team = TeamTarget.CounterTerrorist; return null; }
                 return Finish(s, "", $"Your agent for team **{TeamLabel(s.Team)}** has been successfully set to `{Inline(agent?.DisplayName ?? "Default")}`.", agent?.Image ?? "");
             case Stage.Music:

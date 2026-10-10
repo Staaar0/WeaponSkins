@@ -64,7 +64,7 @@ public sealed partial class PickerService
     {
         var key = $"{s.Stage}|{s.Category}|{s.DefIndex}|{s.Team}|{s.Filter}";
         if (s.CacheKey == key) return s.Cached;
-        // Share immutable unfiltered catalogue choices across players. Only search results belong to a session.
+        // Share the full catalog; keep search results per menu.
         var catalogueKey = s.Stage switch {
             Stage.Weapons => $"weapons|{s.Category}|{s.Team}", Stage.Paints => $"paints|{s.DefIndex}",
             Stage.Agents => $"agents|{s.Team}", _ => s.Stage.ToString()
@@ -88,7 +88,7 @@ public sealed partial class PickerService
             Stage.Paints => (catalog.Paints.GetValueOrDefault(s.DefIndex) ?? []).Select(x => new Choice(x.Paint.ToString(),
                 string.IsNullOrEmpty(x.DisplayName) ? catalog.WeaponName(s.DefIndex) + " | " + x.Name : x.DisplayName, x.Image, x.RarityColor)),
             Stage.Agents => (s.Team == TeamTarget.CounterTerrorist ? catalog.AgentsCT : catalog.AgentsT)
-                // Values are stable indexes; long agent model paths never exceed Discord's 100-character option limit.
+                // Use indexes to stay within Discord's 100-character value limit.
                 .Select((x, i) => new Choice("agent_" + i, string.IsNullOrEmpty(x.DisplayName) ? x.Name : x.DisplayName, x.Image, x.RarityColor)),
             Stage.Music => catalog.MusicKits.Select(x => new Choice(x.Id.ToString(), x.Name, x.Image)),
             Stage.Pins => catalog.Pins.Select(x => new Choice(x.Id.ToString(), x.Name, x.Image)),
@@ -157,7 +157,7 @@ public sealed partial class PickerService
             foreach (var choice in choices.Skip(s.Page * PageSize).Take(PageSize))
                 menu.AddOption(Short(choice.Label), choice.Value, "Click to select", RarityEmoji(choice.Rarity));
             if (s.Stage != Stage.Paints && s.Page < pages - 1) menu.AddOption("Next Page", "__next", emote: Emoji.Parse(":arrow_right:"));
-            // Discord Utilities puts buttons above the selection menu.
+            // Show buttons above the menu, like Discord Utilities.
             var hasButtons = s.Stage != Stage.Weapons || s.Category is "Knifes" or "Gloves";
             components.WithSelectMenu(menu, row: hasButtons ? 1 : 0);
         }

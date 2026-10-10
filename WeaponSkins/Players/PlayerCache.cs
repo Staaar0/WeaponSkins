@@ -59,9 +59,6 @@ public sealed class PlayerCache
 		foreach (var cancellation in cancellations)
 			Cancel(cancellation);
 	}
-
-
-
 	public void Fetch(ulong steamId)
 	{
 		if (steamId == 0)
@@ -82,8 +79,13 @@ public sealed class PlayerCache
 
 	public void Reload(ulong steamId)
 	{
-		if (steamId == 0)
-			return;
+		_ = ReloadAsync(steamId);
+	}
+
+	public Task<bool> ReloadAsync(ulong steamId, CancellationToken cancellationToken = default)
+	{
+		if (steamId == 0 || cancellationToken.IsCancellationRequested)
+			return Task.FromResult(false);
 
 		CancellationTokenSource cancellation;
 		CancellationTokenSource? previous;
@@ -91,15 +93,15 @@ public sealed class PlayerCache
 		{
 			loadouts.TryRemove(steamId, out _);
 			loading.Remove(steamId, out previous);
-			cancellation = new CancellationTokenSource();
+			cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 			loading.Add(steamId, cancellation);
 		}
 
 		Cancel(previous);
-		_ = FetchAsync(steamId, cancellation);
+		return FetchAsync(steamId, cancellation);
 	}
 
-	private async Task FetchAsync(ulong steamId, CancellationTokenSource cancellation)
+	private async Task<bool> FetchAsync(ulong steamId, CancellationTokenSource cancellation)
 	{
 		var token = cancellation.Token;
 		try
@@ -109,25 +111,26 @@ public sealed class PlayerCache
 				try
 				{
 					var loadout = await store.Load(steamId, token);
-					lock (loadSync)
+					// Finish on the game thread before acknowledging a Discord refresh.
+					return await Server.NextWorldUpdateAsync(() =>
 					{
-						if (token.IsCancellationRequested ||
-							!loading.TryGetValue(steamId, out var current) ||
-							!ReferenceEquals(current, cancellation))
-							return;
+						lock (loadSync)
+						{
+							if (token.IsCancellationRequested ||
+								!loading.TryGetValue(steamId, out var current) ||
+								!ReferenceEquals(current, cancellation))
+								return false;
 
-						loadout.Ready = true;
-						loadouts[steamId] = loadout;
-					}
+							loadout.Ready = true;
+							loadouts[steamId] = loadout;
+						}
 
-					Server.NextWorldUpdate(() =>
-					{
-						if (!token.IsCancellationRequested &&
-							loadouts.TryGetValue(steamId, out var current) &&
-							ReferenceEquals(current, loadout))
-							LoadoutReady?.Invoke(steamId);
-					});
-					return;
+						LoadoutReady?.Invoke(steamId);
+						lock (loadSync)
+							return !token.IsCancellationRequested &&
+								loading.TryGetValue(steamId, out var currentLoad) && ReferenceEquals(currentLoad, cancellation) &&
+								loadouts.TryGetValue(steamId, out var currentLoadout) && ReferenceEquals(currentLoadout, loadout);
+					}).WaitAsync(token);
 				}
 				catch (OperationCanceledException)
 				{
@@ -156,6 +159,7 @@ public sealed class PlayerCache
 			}
 			cancellation.Dispose();
 		}
+		return false;
 	}
 
 	public static List<CsTeam> TargetTeams(CCSPlayerController player)
