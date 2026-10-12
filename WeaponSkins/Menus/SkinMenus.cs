@@ -166,8 +166,9 @@ public sealed class SkinMenus
 			new(plugin.Text("menu.stattrak"), (p, s) =>
 			{
 				ToggleStatTrak(p, s.Ctx.WeaponDef);
-				Renderer.Rebuild(p, s);
-			}, plugin.Text(entry is { StatTrak: >= 0 } ? "menu.on" : "menu.off")),
+				if (!s.Native)
+					Renderer.Rebuild(p, s);
+			}, toggle: entry is { StatTrak: >= 0 }),
 			new(plugin.Text("menu.nametag"), (p, s) =>
 			{
 				if (Entry(p, s.Ctx.WeaponDef)?.NameTag != null)

@@ -23,4 +23,11 @@
 		<None Include="gamedata\**" CopyToOutputDirectory="PreserveNewest" Link="gamedata\%(Filename)%(Extension)" />
 	</ItemGroup>
 
+	<ItemGroup>
+	  <Reference Include="MenuManagerApi">
+	    <HintPath>..\..\API\MenuManagerApi.dll</HintPath>
+	    <Private>false</Private>
+	  </Reference>
+	</ItemGroup>
+
 </Project>

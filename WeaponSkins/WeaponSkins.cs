@@ -1,11 +1,13 @@
 using System.Text;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Modules.Extensions;
 using CounterStrikeSharp.API.Modules.Utils;
+using MenuManager;
 using Microsoft.Extensions.Logging;
 
 namespace WeaponSkins;
@@ -35,6 +37,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	public bool Initialized => initialized;
 	public bool Stopping => stopping;
 
+	private static readonly PluginCapability<IMenuApi?> MenuCapability = new("menu:nfcore");
 	private static readonly Dictionary<string, char> ColorMap = new(StringComparer.OrdinalIgnoreCase)
 	{
 		["default"] = '\x01',
@@ -218,6 +221,12 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 		if (Db.Configured && !string.IsNullOrWhiteSpace(Config.Api.BaseUrl))
 			catalogTask = Task.Run(() => RefreshCatalog(LifetimeToken));
+	}
+
+	public override void OnAllPluginsLoaded(bool hotReload)
+	{
+		try { Menu.Bind(MenuCapability.Get()); }
+		catch { Menu.Bind(null); }
 	}
 
 	private async Task StartAfterPreviousShutdown(Task? previousShutdown, bool hotReload, CancellationToken cancellationToken)
