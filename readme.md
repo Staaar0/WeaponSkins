@@ -104,10 +104,44 @@ Command names can be changed in the config, except `!link`.
 | `/gen CODE` | Apply a full craft from an inspect code |
 | `/loadout` | Everything you have equipped |
 
+## Menu Style
+
+- Optional Menu Style
+
+Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
+
+```json
+"Menu_Style":
+```
+- Options
+
+1. Bulit-in (Default)
+2. [MenuManagerCS2](https://github.com/NickFox007/MenuManagerCS2) By: `NickFox007`
+3. [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) By: `RRimmer`
+
+<table>
+<tr>
+<td width="50%" align="center">
+<img src="docs/Built-in.png" width="100%" alt="Built-in Showcase"><br>
+<strong>Built-in Showcase</strong>
+</td>
+<td width="50%" align="center">
+<img src="docs/MenuManager.png" width="100%" alt="NickFox-MenuManager Menu Showcase"><br>
+<strong>NickFox-MenuManager Showcase</strong>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center">
+<img src="docs/PanoramaMenu.png" width="100%" alt="RRimmer-PanoramaMenu Showcase"><br>
+<strong>RRimmer-PanoramaMenu Showcase</strong>
+</td>
+</tr>
+</table>
+
 ## Default Config
 ```json
 {
-  "ConfigVersion": 5,
+  "ConfigVersion": 6,
   "api": {
     "base_url": "https://cdn.jsdelivr.net/gh/ByMykel/CSGO-API@main/public/api",
     "language": "en",
@@ -134,6 +168,7 @@ Command names can be changed in the config, except `!link`.
     "change_cooldown": 5
   },
   "menu": {
+    "Menu_Style": 1, // 1=Built-in 2=NickFox-MenuManager 3=RRimmer-PanoramaMenu
     "freeze_player": false,
     "items_per_page": 4,
     "show_image": true,

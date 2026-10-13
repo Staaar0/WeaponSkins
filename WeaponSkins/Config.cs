@@ -7,7 +7,7 @@ namespace WeaponSkins;
 public class SkinsConfig : BasePluginConfig
 {
 	[JsonPropertyName("ConfigVersion")]
-	public override int Version { get; set; } = 5;
+	public override int Version { get; set; } = 6;
 
 	[JsonPropertyName("api")]
 	public ApiConfig Api { get; set; } = new();
@@ -116,6 +116,9 @@ public class StickersConfig
 
 public class MenuConfig
 {
+	[JsonPropertyName("Menu_Style")]
+	public int MenuStyle { get; set; } = 1;
+
 	[JsonPropertyName("freeze_player")]
 	public bool FreezePlayer { get; set; } = false;
 

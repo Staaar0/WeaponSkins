@@ -6,13 +6,15 @@ public sealed class MenuItem
 {
 	public readonly string Text;
 	public readonly string? Value;
+	public readonly bool? Toggle;
 	public readonly Action<CCSPlayerController, MenuSession>? Select;
 
-	public MenuItem(string text, Action<CCSPlayerController, MenuSession>? select, string? value = null)
+	public MenuItem(string text, Action<CCSPlayerController, MenuSession>? select, string? value = null, bool? toggle = null)
 	{
 		Text = text;
 		Select = select;
 		Value = value;
+		Toggle = toggle;
 	}
 }
 
@@ -43,6 +45,7 @@ public sealed class MenuSession
 	public int Cursor;
 	public MenuContext Ctx = new();
 	public PendingInput? Input;
+	public bool Native;
 	public string? Html;
 	public ulong PrevButtons;
 	public int HeldTicks;

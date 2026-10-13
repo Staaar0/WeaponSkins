@@ -16,7 +16,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.7";
+	public override string ModuleVersion => "1.1.8";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
@@ -83,6 +83,8 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	public void OnConfigParsed(SkinsConfig config)
 	{
+		config.Version = Math.Max(config.Version, 6);
+		config.Menu ??= new MenuConfig();
 		if (config.LinkingMethod == "2" || string.Equals(config.LinkingMethod, "Discord-Utilities", StringComparison.OrdinalIgnoreCase))
 			config.LinkingMethod = "Discord-Utilities";
 		else if (config.LinkingMethod == "1" || string.Equals(config.LinkingMethod, "WeaponSkinsBOT", StringComparison.OrdinalIgnoreCase))
@@ -94,45 +96,52 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 
 		Config = config;
-		UpdateConfigNotes();
+		UpdateConfigFile();
 	}
 
-	private void UpdateConfigNotes()
+	private void UpdateConfigFile()
 	{
+		string? temporary = null;
 		try
 		{
 			var path = Config.GetConfigPath();
 			if (!File.Exists(path) || !string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase))
 				return;
 
-			var original = File.ReadAllLines(path);
-			var lines = original.Where(line => !line.Contains("\"linking_method_note\"", StringComparison.Ordinal)).ToArray();
-			var changed = lines.Length != original.Length;
-			for (var i = 0; i < lines.Length; i++)
+			// Change only the new option, version and missing notes.
+			var originalBytes = File.ReadAllBytes(path);
+			using var reader = new StreamReader(new MemoryStream(originalBytes), Encoding.UTF8, true);
+			var original = reader.ReadToEnd();
+			var updated = ConfigMigration.UpdateJson(original);
+			if (original == updated)
+				return;
+
+			var encoding = reader.CurrentEncoding;
+			var preamble = encoding.GetPreamble();
+			var keepPreamble = preamble.Length > 0 && originalBytes.AsSpan().StartsWith(preamble);
+			var payload = encoding.GetBytes(updated);
+			var updatedBytes = keepPreamble ? preamble.Concat(payload).ToArray() : payload;
+			temporary = path + ".tmp." + Guid.NewGuid().ToString("N");
+			File.WriteAllBytes(temporary, updatedBytes);
+			if (!OperatingSystem.IsWindows())
+				File.SetUnixFileMode(temporary, File.GetUnixFileMode(path));
+
+			if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(originalBytes))
 			{
-				var trimmed = lines[i].TrimStart();
-				string? note = null;
-				if (trimmed.StartsWith("\"linking_method\"", StringComparison.Ordinal))
-					note = "link options 1=WeaponSkinsBOT 2=Discord-Utilities";
-				else if (trimmed.StartsWith("\"discord_bot_token\"", StringComparison.Ordinal))
-					note = "Discord bot will start/stop with cs2 server";
-
-				if (note == null)
-					continue;
-
-				var comment = lines[i].IndexOf("//", StringComparison.Ordinal);
-				var value = (comment < 0 ? lines[i] : lines[i][..comment]).TrimEnd();
-				var updated = $"{value} // {note}";
-				changed |= lines[i] != updated;
-				lines[i] = updated;
+				Logger.LogWarning("Config changed during migration; leaving it untouched until the next load");
+				return;
 			}
-
-			if (changed)
-				File.WriteAllLines(path, lines);
+			File.Move(temporary, path, overwrite: true);
+			temporary = null;
 		}
 		catch (Exception ex)
 		{
-			Logger.LogWarning("Could not add the config notes: {Error}", ex.GetBaseException().Message);
+			Logger.LogWarning("Could not update the config: {Error}", ex.GetBaseException().Message);
+		}
+		finally
+		{
+			if (temporary != null)
+				try { File.Delete(temporary); } catch { }
 		}
 	}
 
@@ -218,6 +227,11 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 		if (Db.Configured && !string.IsNullOrWhiteSpace(Config.Api.BaseUrl))
 			catalogTask = Task.Run(() => RefreshCatalog(LifetimeToken));
+	}
+
+	public override void OnAllPluginsLoaded(bool hotReload)
+	{
+		Menu.Bind(NativeMenuProvider.Find(Config.Menu.MenuStyle, Logger));
 	}
 
 	private async Task StartAfterPreviousShutdown(Task? previousShutdown, bool hotReload, CancellationToken cancellationToken)

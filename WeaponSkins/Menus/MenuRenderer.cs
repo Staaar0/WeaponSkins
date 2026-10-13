@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Menu;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Localization;
 
@@ -22,6 +23,15 @@ public sealed class MenuRenderer
 	private readonly IStringLocalizer localizer;
 	private readonly StringBuilder builder = new(1024);
 	private readonly MenuItem backItem;
+	private NativeMenuProvider? api;
+
+	public void Bind(NativeMenuProvider? menuApi)
+	{
+		if (ReferenceEquals(api, menuApi))
+			return;
+		CloseAll();
+		api = menuApi;
+	}
 
 	public MenuRenderer(MenuConfig config, IStringLocalizer localizer)
 	{
@@ -38,12 +48,16 @@ public sealed class MenuRenderer
 	public void Open(CCSPlayerController player, Func<CCSPlayerController, MenuSession, Menu> factory, bool root = false)
 	{
 		if (!sessions.TryGetValue(player.Slot, out var session))
-			sessions[player.Slot] = session = new MenuSession();
+		{
+			session = new MenuSession { Native = api != null };
+			sessions[player.Slot] = session;
+		}
 
 		if (root)
 		{
 			session.Stack.Clear();
 			session.Ctx = new MenuContext();
+			session.Native = api != null;
 		}
 		else if (session.Current != null)
 		{
@@ -51,14 +65,16 @@ public sealed class MenuRenderer
 		}
 
 		session.Stack.Add((factory, 0));
-		session.Current = Compose(factory(player, session), session);
+		session.Current = Build(player, session, factory);
 		session.Cursor = Math.Min(session.Stack.Count > 1 ? 1 : 0, Math.Max(0, session.Current.Items.Count - 1));
 		session.Input = null;
 		session.Html = null;
 		session.PrevButtons = (ulong)player.Buttons;
 
-		if (config.FreezePlayer)
+		if (!session.Native && config.FreezePlayer)
 			Freeze(player, session, true);
+
+		Show(player, session);
 	}
 
 	public void Rebuild(CCSPlayerController player, MenuSession session)
@@ -66,9 +82,10 @@ public sealed class MenuRenderer
 		if (session.Stack.Count == 0)
 			return;
 
-		session.Current = Compose(session.Stack[^1].Factory(player, session), session);
+		session.Current = Build(player, session, session.Stack[^1].Factory);
 		session.Cursor = Math.Clamp(session.Cursor, 0, Math.Max(0, session.Current.Items.Count - 1));
 		session.Html = null;
+		Show(player, session);
 	}
 
 	public void Back(CCSPlayerController player, MenuSession session)
@@ -81,10 +98,11 @@ public sealed class MenuRenderer
 
 		session.Stack.RemoveAt(session.Stack.Count - 1);
 		var (factory, cursor) = session.Stack[^1];
-		session.Current = Compose(factory(player, session), session);
+		session.Current = Build(player, session, factory);
 		session.Cursor = Math.Clamp(cursor, 0, Math.Max(0, session.Current.Items.Count - 1));
 		session.Input = null;
 		session.Html = null;
+		Show(player, session);
 	}
 
 	public void Close(CCSPlayerController player)
@@ -95,14 +113,30 @@ public sealed class MenuRenderer
 		if (session.Frozen)
 			Freeze(player, session, false);
 
-		if (player.IsValid)
+		if (!player.IsValid)
+			return;
+
+		if (session.Native && api != null)
+			api.CloseMenu(player);
+		else
 			player.PrintToCenterHtml(" ");
 	}
 
 	public void Drop(int slot)
 	{
-		sessions.Remove(slot);
+		if (!sessions.Remove(slot, out var session))
+		{
+			images.Remove(slot);
+			return;
+		}
+
 		images.Remove(slot);
+		if (!session.Native || api == null)
+			return;
+
+		var player = Utilities.GetPlayerFromSlot(slot);
+		if (player != null && player.IsValid)
+			api.CloseMenu(player);
 	}
 
 
@@ -145,11 +179,16 @@ public sealed class MenuRenderer
 	{
 		session.Input = new PendingInput { Prompt = prompt, OnText = onText };
 		session.Html = null;
+		if (session.Native && player.IsValid)
+			player.PrintToChat(" " + prompt);
 	}
 
 	public void ShowImage(CCSPlayerController player, string url)
 	{
 		if (!config.ShowImage || url.Length == 0)
+			return;
+
+		if (sessions.TryGetValue(player.Slot, out var session) && session.Native)
 			return;
 
 		images[player.Slot] = (url, Environment.TickCount64 + (long)(config.ImageSeconds * 1000f));
@@ -186,6 +225,9 @@ public sealed class MenuRenderer
 				sessions.Remove(slot);
 				continue;
 			}
+
+			if (session.Native)
+				continue;
 
 			if (session.Input == null)
 			{
@@ -302,6 +344,7 @@ public sealed class MenuRenderer
 		for (var i = start; i < end; i++)
 		{
 			var item = menu.Items[i];
+			var value = ItemValue(item);
 			var text = item.Text.Length > 34 ? item.Text[..34] : item.Text;
 
 			if (i == session.Cursor)
@@ -309,8 +352,8 @@ public sealed class MenuRenderer
 			else
 				builder.Append("<font color='#9E9E9E'>\u00A0\u00A0\u2009").Append(WebUtility.HtmlEncode(text)).Append("</font>");
 
-			if (item.Value != null)
-				builder.Append(" <font color='#6E6E6E'>").Append(WebUtility.HtmlEncode(item.Value)).Append("</font>");
+			if (value != null)
+				builder.Append(" <font color='#6E6E6E'>").Append(WebUtility.HtmlEncode(value)).Append("</font>");
 
 			builder.Append("<br>");
 		}
@@ -338,6 +381,91 @@ public sealed class MenuRenderer
 		}
 
 		session.Frozen = freeze;
+	}
+
+	private Menu Build(CCSPlayerController player, MenuSession session, Func<CCSPlayerController, MenuSession, Menu> factory)
+	{
+		var built = factory(player, session);
+		return session.Native ? built : Compose(built, session);
+	}
+
+	private void Show(CCSPlayerController player, MenuSession session)
+	{
+		if (!session.Native || session.Current == null)
+			return;
+
+		if (api != null)
+		{
+			try
+			{
+				ShowNative(player, session);
+				return;
+			}
+			catch (Exception ex)
+			{
+				api.ReportFailure(ex);
+				api.CloseMenu(player);
+			}
+		}
+
+		// Keep the menu usable if the selected provider fails.
+		session.Native = false;
+		session.Current = Compose(session.Current, session);
+		session.Html = null;
+		if (config.FreezePlayer && !session.Frozen)
+			Freeze(player, session, true);
+	}
+
+	private void ShowNative(CCSPlayerController player, MenuSession session)
+	{
+		var model = session.Current!;
+		Action<CCSPlayerController>? back = session.Stack.Count > 1 ? p =>
+		{
+			if (session.Native && sessions.TryGetValue(p.Slot, out var active) &&
+				ReferenceEquals(active, session) && ReferenceEquals(session.Current, model))
+				Back(p, session);
+		} : null;
+		var menu = api!.CreateMenu(model.Title, back);
+		menu.PostSelectAction = PostSelectAction.Nothing;
+
+		foreach (var item in model.Items)
+		{
+			var captured = item;
+			var nativeToggle = false;
+			Action<CCSPlayerController, ChatMenuOption> select = (p, _) =>
+			{
+				if (!session.Native || !sessions.TryGetValue(p.Slot, out var active) || !ReferenceEquals(active, session) ||
+					!ReferenceEquals(session.Current, model))
+					return;
+
+				captured.Select?.Invoke(p, session);
+				// Refresh the toggle label if the same menu is still open.
+				if (captured.Toggle.HasValue && !nativeToggle && session.Input == null &&
+					sessions.TryGetValue(p.Slot, out var current) && ReferenceEquals(current, session) &&
+					ReferenceEquals(session.Current, model))
+					Rebuild(p, session);
+			};
+
+			if (captured.Value == null && captured.Toggle is bool on)
+				nativeToggle = api.TryAddToggle(menu, captured.Text, on, select, captured.Select == null);
+			if (nativeToggle)
+				continue;
+
+			var value = ItemValue(captured);
+			var text = value == null ? captured.Text : $"{captured.Text} · {value}";
+			menu.AddMenuOption(text, select, captured.Select == null);
+		}
+
+		menu.Open(player);
+	}
+
+	private string? ItemValue(MenuItem item)
+	{
+		if (item.Value != null)
+			return item.Value;
+		if (item.Toggle is bool on)
+			return localizer[on ? "menu.on" : "menu.off"].Value;
+		return null;
 	}
 
 	private Menu Compose(Menu menu, MenuSession session)
