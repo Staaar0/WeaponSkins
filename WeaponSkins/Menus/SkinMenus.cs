@@ -76,7 +76,7 @@ public sealed class SkinMenus
 		foreach (var category in Catalog.Categories)
 		{
 			var name = category;
-			items.Add(new MenuItem(name, (p, s) => Renderer.Open(p, (pp, ss) => CategoryMenu(pp, ss, name))));
+			items.Add(new MenuItem(CategoryLabel(name), (p, s) => Renderer.Open(p, (pp, ss) => CategoryMenu(pp, ss, name))));
 		}
 
 		return new Menu { Title = plugin.Text("menu.skins"), Items = items };
@@ -103,7 +103,16 @@ public sealed class SkinMenus
 			}));
 		}
 
-		return new Menu { Title = category, Items = items };
+		return new Menu { Title = CategoryLabel(category), Items = items };
+	}
+
+	private string CategoryLabel(string category)
+	{
+		if (Catalog.TryGetCategoryLabel(category, out var label))
+			return label;
+		var key = "category." + category.ToLowerInvariant();
+		var text = plugin.Text(key);
+		return text == key ? category : text;
 	}
 
 	private Menu PaintList(CCSPlayerController player, MenuSession session)
@@ -801,7 +810,7 @@ public sealed class SkinMenus
 		foreach (var group in Catalog.PinGroups)
 		{
 			var name = group;
-			items.Add(new MenuItem(name, (p, s) => Renderer.Open(p, (pp, ss) => PinGroupList(pp, ss, name))));
+			items.Add(new MenuItem(PinGroupLabel(name), (p, s) => Renderer.Open(p, (pp, ss) => PinGroupList(pp, ss, name))));
 		}
 
 		return new Menu { Title = plugin.Text("menu.pins"), Items = items };
@@ -817,7 +826,29 @@ public sealed class SkinMenus
 			items.Add(new MenuItem(pin.Name, (p, s) => SetPin(p, s, value)));
 		}
 
-		return new Menu { Title = group, Items = items };
+		return new Menu { Title = PinGroupLabel(group), Items = items };
+	}
+
+	private string PinGroupLabel(string group)
+	{
+		var key = group switch
+		{
+			"Major Trophies" => "menu.pin_major_trophies",
+			"Major Pick'Em / Fantasy" => "menu.pin_major_pickem",
+			"Major Viewer Passes / Coins" => "menu.pin_major_passes",
+			"Operations" => "menu.pin_operations",
+			"Workshop Map Coins" => "menu.pin_workshop",
+			"Pins" => "menu.pin_pins",
+			"Service Medals" => "menu.pin_service",
+			"Premier Medals" => "menu.pin_premier",
+			"Coins" => "menu.pin_coins",
+			"Other" => "menu.pin_other",
+			_ => ""
+		};
+		if (key.Length == 0)
+			return group;
+		var text = plugin.Text(key);
+		return text == key ? group : text;
 	}
 
 	private void SetPin(CCSPlayerController player, MenuSession session, PinDef? pin)
