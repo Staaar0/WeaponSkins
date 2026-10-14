@@ -1167,7 +1167,7 @@ public sealed class SkinMenus
 		foreach (var source in browser.Sources)
 		{
 			var value = source;
-			items.Add(new MenuItem(source, (p, s) =>
+			items.Add(new MenuItem(StickerSourceLabel(source), (p, s) =>
 			{
 				if (value == "Community / Workshop Stickers")
 					Renderer.Open(p, (pp, ss) => StickerTypeMenu(pp, ss, value, ""));
@@ -1197,7 +1197,7 @@ public sealed class SkinMenus
 			items.Add(new MenuItem(group, (p, s) => Renderer.Open(p, (pp, ss) => StickerTypeMenu(pp, ss, source, value))));
 		}
 
-		return new Menu { Title = plugin.Text("menu.sticker_event", source), Items = items };
+		return new Menu { Title = plugin.Text("menu.sticker_event", StickerSourceLabel(source)), Items = items };
 	}
 
 	private Menu StickerTypeMenu(CCSPlayerController player, MenuSession session, string source, string group)
@@ -1220,7 +1220,7 @@ public sealed class SkinMenus
 			}));
 		}
 
-		var title = group.Length > 0 ? group : source;
+		var title = group.Length > 0 ? group : StickerSourceLabel(source);
 		return new Menu { Title = plugin.Text("menu.sticker_type", title), Items = items };
 	}
 
@@ -1551,6 +1551,22 @@ public sealed class SkinMenus
 
 		var index = Array.FindIndex(groups, item => string.Equals(item, group, StringComparison.OrdinalIgnoreCase));
 		return index >= 0 ? index : groups.Length;
+	}
+
+	private string StickerSourceLabel(string source)
+	{
+		var key = source switch
+		{
+			"Major Stickers" => "menu.sticker_source_major",
+			"Operation Stickers" => "menu.sticker_source_operation",
+			"Capsule Stickers" => "menu.sticker_source_capsule",
+			"Community / Workshop Stickers" => "menu.sticker_source_community",
+			_ => ""
+		};
+		if (key.Length == 0)
+			return source;
+		var text = plugin.Text(key);
+		return text == key ? source : text;
 	}
 
 	private static string StickerSlotTitle(int slot)
