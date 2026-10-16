@@ -30,6 +30,7 @@ public sealed class CatalogService
 		public IReadOnlyDictionary<int, string> WeaponClasses { get; set; } = new Dictionary<int, string>();
 		public IReadOnlyDictionary<int, string> StickerNames { get; set; } = new Dictionary<int, string>();
 		public IReadOnlyDictionary<int, string> CharmNames { get; set; } = new Dictionary<int, string>();
+		public IReadOnlyDictionary<string, string> CategoryLabels { get; set; } = new Dictionary<string, string>();
 		public IReadOnlyDictionary<(int DefIndex, int Paint), PaintDef> PaintIndex { get; set; } = new Dictionary<(int, int), PaintDef>();
 	}
 
@@ -56,6 +57,7 @@ public sealed class CatalogService
 	public IReadOnlyDictionary<int, string> WeaponClasses { get => Volatile.Read(ref data).WeaponClasses; private set => data.WeaponClasses = value; }
 	public IReadOnlyDictionary<int, string> StickerNames { get => Volatile.Read(ref data).StickerNames; private set => data.StickerNames = value; }
 	public IReadOnlyDictionary<int, string> CharmNames { get => Volatile.Read(ref data).CharmNames; private set => data.CharmNames = value; }
+	public IReadOnlyDictionary<string, string> CategoryLabels { get => Volatile.Read(ref data).CategoryLabels; private set => data.CategoryLabels = value; }
 	private IReadOnlyDictionary<(int DefIndex, int Paint), PaintDef> paintIndex => Volatile.Read(ref data).PaintIndex;
 	public event Action? Changed;
 
@@ -63,6 +65,11 @@ public sealed class CatalogService
 	private readonly string dataDirectory;
 	private readonly SemaphoreSlim loadGate = new(1, 1);
 	private readonly Func<Action, CancellationToken, Task>? publish;
+
+	public bool TryGetCategoryLabel(string kind, out string label)
+	{
+		return CategoryLabels.TryGetValue(kind, out label!) && label.Length > 0;
+	}
 
 	public CatalogService(ILogger logger, string dataDirectory,
 		Func<Action, CancellationToken, Task>? publish = null)
@@ -109,15 +116,15 @@ public sealed class CatalogService
 			{
 				try
 				{
-					using var api = new ApiClient(config);
-					await staged.LoadFrom(api, cancellationToken);
-					source = "online API";
+					var usedEnglish = await staged.LoadOnline(config, cancellationToken);
+					source = usedEnglish ? "online API (missing files in English)" : "online API";
 				}
 				catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
 				{
-					logger.LogWarning("Online item data failed, using local files: {Error}", ex.Message);
+					logger.LogWarning("Online item data failed, using local files: {Error}", ex.GetBaseException().Message);
 					using var local = new ApiClient(dataDirectory);
 					await staged.LoadFrom(local, cancellationToken);
+					source = "local files";
 				}
 			}
 			else
@@ -147,14 +154,73 @@ public sealed class CatalogService
 		}
 	}
 
-	private async Task LoadFrom(ApiClient api, CancellationToken cancellationToken)
+	private static ApiConfig EnglishCatalog(ApiConfig config)
 	{
-		var skinsTask = api.Fetch("skins", cancellationToken);
-		var stickersTask = api.Fetch("stickers", cancellationToken);
-		var agentsTask = api.Fetch("agents", cancellationToken);
-		var musicTask = api.Fetch("music_kits", cancellationToken);
-		var pinsTask = api.Fetch("collectibles", cancellationToken);
-		var charmsTask = api.Fetch("keychains", cancellationToken);
+		return new ApiConfig
+		{
+			BaseUrl = config.BaseUrl,
+			Language = "en",
+			TimeoutSeconds = config.TimeoutSeconds
+		};
+	}
+
+	private async Task<bool> LoadOnline(ApiConfig config, CancellationToken cancellationToken)
+	{
+		using var primary = new ApiClient(config);
+		var useEnglish = !string.Equals(config.Language, "en", StringComparison.OrdinalIgnoreCase);
+		using var english = useEnglish ? new ApiClient(EnglishCatalog(config)) : null;
+		var usedEnglish = false;
+
+		Task<JsonDocument> Fetch(string file)
+		{
+			return FetchFile(file);
+			async Task<JsonDocument> FetchFile(string name)
+			{
+				try
+				{
+					return await primary.Fetch(name, cancellationToken);
+				}
+				catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+				{
+					logger.LogWarning("Item file {File} for {Language} failed: {Error}", name, config.Language, ex.GetBaseException().Message);
+					if (english != null)
+					{
+						try
+						{
+							var document = await english.Fetch(name, cancellationToken);
+							usedEnglish = true;
+							return document;
+						}
+						catch (Exception englishEx) when (!cancellationToken.IsCancellationRequested)
+						{
+							logger.LogWarning("English item file {File} failed, using the local file: {Error}", name, englishEx.GetBaseException().Message);
+						}
+					}
+
+					usedEnglish = true;
+					using var local = new ApiClient(dataDirectory);
+					return await local.Fetch(name, cancellationToken);
+				}
+			}
+		}
+
+		await LoadFrom(Fetch, cancellationToken);
+		return usedEnglish;
+	}
+
+	private Task LoadFrom(ApiClient api, CancellationToken cancellationToken)
+	{
+		return LoadFrom(file => api.Fetch(file, cancellationToken), cancellationToken);
+	}
+
+	private async Task LoadFrom(Func<string, Task<JsonDocument>> fetch, CancellationToken cancellationToken)
+	{
+		var skinsTask = fetch("skins");
+		var stickersTask = fetch("stickers");
+		var agentsTask = fetch("agents");
+		var musicTask = fetch("music_kits");
+		var pinsTask = fetch("collectibles");
+		var charmsTask = fetch("keychains");
 		Task<JsonDocument>[] tasks = [skinsTask, stickersTask, agentsTask, musicTask, pinsTask, charmsTask];
 		var disposeFrom = 0;
 
@@ -196,6 +262,7 @@ public sealed class CatalogService
 			var knives = new Dictionary<int, string>();
 			var gloves = new Dictionary<int, string>();
 			var classes = new Dictionary<int, string>();
+			var categoryLabels = new Dictionary<string, string>(StringComparer.Ordinal);
 
 			foreach (var skin in doc.RootElement.EnumerateArray())
 			{
@@ -213,9 +280,9 @@ public sealed class CatalogService
 				var weaponName = NormalizeMenuName(weapon.GetProperty("name").GetString());
 				if (weapon.TryGetProperty("id", out var className) && className.GetString() is { Length: > 0 } entityClass)
 					classes[defIndex] = entityClass;
-				var category = skin.GetProperty("category").GetProperty("name").GetString() ?? "";
-				if (category == "Equipment")
-					category = "Other";
+				var (category, categoryName) = CanonicalCategory(skin.GetProperty("category"));
+				if (categoryName.Length > 0)
+					categoryLabels.TryAdd(category, categoryName);
 				if (defIndex is 9 or 11 or 38 or 40)
 					category = "Snipers";
 
@@ -290,6 +357,7 @@ public sealed class CatalogService
 			Gloves = gloves.Select(g => new GloveDef(g.Key, g.Value)).OrderBy(g => g.Name).ToList();
 			WeaponNames = names;
 			WeaponClasses = classes;
+			CategoryLabels = categoryLabels;
 		}
 	}
 
@@ -494,6 +562,28 @@ public sealed class CatalogService
 		return element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
 			? value.GetString() ?? ""
 			: "";
+	}
+
+	private static (string Kind, string Label) CanonicalCategory(JsonElement category)
+	{
+		var id = category.TryGetProperty("id", out var idValue) && idValue.ValueKind == JsonValueKind.String
+			? idValue.GetString() ?? ""
+			: "";
+		var name = category.TryGetProperty("name", out var nameValue) && nameValue.ValueKind == JsonValueKind.String
+			? nameValue.GetString() ?? ""
+			: "";
+		var kind = id switch
+		{
+			"sfui_invpanel_filter_gloves" => "Gloves",
+			"sfui_invpanel_filter_melee" => "Knives",
+			"loadoutslot_equipment" => "Other",
+			"csgo_inventory_weapon_category_pistols" => "Pistols",
+			"csgo_inventory_weapon_category_smgs" => "SMGs",
+			"csgo_inventory_weapon_category_rifles" => "Rifles",
+			"csgo_inventory_weapon_category_heavy" => "Heavy",
+			_ => name == "Equipment" ? "Other" : name
+		};
+		return (kind, name.Length > 0 ? name : kind);
 	}
 
 	private static string NormalizeMenuName(string? value)

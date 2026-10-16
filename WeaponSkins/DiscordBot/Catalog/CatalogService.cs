@@ -7,6 +7,8 @@ public sealed class CatalogService : IDisposable
 {
 	private readonly HttpClient http;
 	private readonly string baseUrl;
+	private readonly string englishBaseUrl;
+	private readonly string language;
 	private readonly string cacheDirectory;
 	private readonly string fallbackDirectory;
 
@@ -34,7 +36,10 @@ public sealed class CatalogService : IDisposable
 	{
 		this.cacheDirectory = cacheDirectory;
 		this.fallbackDirectory = fallbackDirectory;
-		baseUrl = $"{config.BaseUrl.TrimEnd('/')}/{(string.IsNullOrWhiteSpace(config.Language) ? "en" : config.Language)}";
+		language = string.IsNullOrWhiteSpace(config.Language) ? "en" : config.Language;
+		var root = config.BaseUrl.TrimEnd('/');
+		baseUrl = $"{root}/{language}";
+		englishBaseUrl = $"{root}/en";
 		http = new HttpClient(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
 		{
 			Timeout = TimeSpan.FromSeconds(Math.Max(5, config.TimeoutSeconds))
@@ -129,23 +134,28 @@ public sealed class CatalogService : IDisposable
 	{
 		var path = Path.Combine(cacheDirectory, $"{name}.json");
 		var errors = new List<Exception>();
-		JsonDocument? downloaded = null;
-		try
+		foreach (var url in language.Equals("en", StringComparison.OrdinalIgnoreCase)
+			? new[] { $"{baseUrl}/{name}.json" }
+			: new[] { $"{baseUrl}/{name}.json", $"{englishBaseUrl}/{name}.json" })
 		{
-			var bytes = await http.GetByteArrayAsync($"{baseUrl}/{name}.json", cancellationToken);
-			downloaded = ParseCatalog(name, bytes);
-			await SaveCacheAsync(path, bytes, cancellationToken);
-			return downloaded;
-		}
-		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-		{
-			downloaded?.Dispose();
-			throw;
-		}
-		catch (Exception ex)
-		{
-			downloaded?.Dispose();
-			errors.Add(ex);
+			JsonDocument? downloaded = null;
+			try
+			{
+				var bytes = await http.GetByteArrayAsync(url, cancellationToken);
+				downloaded = ParseCatalog(name, bytes);
+				await SaveCacheAsync(path, bytes, cancellationToken);
+				return downloaded;
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				downloaded?.Dispose();
+				throw;
+			}
+			catch (Exception ex)
+			{
+				downloaded?.Dispose();
+				errors.Add(ex);
+			}
 		}
 
 		foreach (var localPath in new[] { path, Path.Combine(fallbackDirectory, $"{name}.json") })
@@ -235,8 +245,8 @@ public sealed class CatalogService : IDisposable
 
     private void ParseSkins(JsonElement root)
     {
-        MenuCategories = root.EnumerateArray().Select(x => ReadString(x.GetProperty("category"), "name") switch {
-            "Knives" => "Knifes", "SMGs" => "SMG", "Equipment" => "Pistols", var name => name
+        MenuCategories = root.EnumerateArray().Select(x => CanonicalCategory(x.GetProperty("category")) switch {
+            "Knives" => "Knifes", "SMGs" => "SMG", "Other" => "Pistols", var name => name
         }).Distinct().ToArray();
         MenuWeaponOrder = root.EnumerateArray().Select(x => x.GetProperty("weapon").GetProperty("weapon_id").GetInt32())
             .Distinct().Select((def, index) => (def, index)).ToDictionary(x => x.def, x => x.index);
@@ -264,9 +274,7 @@ public sealed class CatalogService : IDisposable
 
             var weaponName = NormalizeMenuName(ReadString(weapon, "name"));
             var category = skin.TryGetProperty("category", out var categoryObj) && categoryObj.ValueKind == JsonValueKind.Object
-                ? ReadString(categoryObj, "name") : "Other";
-            if (category == "Equipment")
-                category = "Other";
+                ? CanonicalCategory(categoryObj) : "Other";
             if (defIndex is 9 or 11 or 38 or 40)
                 category = "Snipers";
 
@@ -356,7 +364,8 @@ public sealed class CatalogService : IDisposable
             if (model.Length == 0)
                 continue;
 
-            var name = ReadString(agent, "name");
+            var rawName = ReadString(agent, "name");
+            var name = rawName;
             var faction = "Other";
             var pipe = name.IndexOf(" | ", StringComparison.Ordinal);
             if (pipe > 0)
@@ -367,7 +376,7 @@ public sealed class CatalogService : IDisposable
 
             var team = agent.TryGetProperty("team", out var teamObj) && teamObj.ValueKind == JsonValueKind.Object
                 ? ReadString(teamObj, "id") : "";
-            var item = new AgentDef(model, name, team == "terrorists" ? 2 : 3, faction, ReadString(agent, "image"), ReadString(agent, "name"), RarityValue(agent, "color"));
+            var item = new AgentDef(model, name, team == "terrorists" ? 2 : 3, faction, ReadString(agent, "image"), rawName, RarityValue(agent, "color"));
             if (item.Team == 2)
                 t.Add(item);
             else
@@ -442,7 +451,23 @@ public sealed class CatalogService : IDisposable
         Charms = list.OrderBy(item => item.Name).ToList();
     }
 
-    private static string ReadString(JsonElement element, string property)
+	private static string CanonicalCategory(JsonElement category)
+	{
+		var name = ReadString(category, "name");
+		return ReadString(category, "id") switch
+		{
+			"sfui_invpanel_filter_gloves" => "Gloves",
+			"sfui_invpanel_filter_melee" => "Knives",
+			"loadoutslot_equipment" => "Other",
+			"csgo_inventory_weapon_category_pistols" => "Pistols",
+			"csgo_inventory_weapon_category_smgs" => "SMGs",
+			"csgo_inventory_weapon_category_rifles" => "Rifles",
+			"csgo_inventory_weapon_category_heavy" => "Heavy",
+			_ => name == "Equipment" ? "Other" : name
+		};
+	}
+
+	private static string ReadString(JsonElement element, string property)
     {
         return element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? "" : "";
