@@ -1,5 +1,8 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using WeaponSkinsBot.Database;
+using WeaponSkins;
 
 namespace WeaponSkinsBot.Catalog;
 
@@ -34,10 +37,10 @@ public sealed class CatalogService : IDisposable
 
 	public CatalogService(string cacheDirectory, string fallbackDirectory, global::WeaponSkins.ApiConfig config)
 	{
-		this.cacheDirectory = cacheDirectory;
 		this.fallbackDirectory = fallbackDirectory;
 		language = string.IsNullOrWhiteSpace(config.Language) ? "en" : config.Language;
 		var root = config.BaseUrl.TrimEnd('/');
+		this.cacheDirectory = Path.Combine(cacheDirectory, CacheKey(root));
 		baseUrl = $"{root}/{language}";
 		englishBaseUrl = $"{root}/en";
 		http = new HttpClient(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
@@ -132,18 +135,19 @@ public sealed class CatalogService : IDisposable
 
 	private async Task<JsonDocument> Fetch(string name, CancellationToken cancellationToken)
 	{
-		var path = Path.Combine(cacheDirectory, $"{name}.json");
+		var path = Path.Combine(cacheDirectory, CacheKey(language.ToLowerInvariant()), $"{name}.json");
+		var englishPath = Path.Combine(cacheDirectory, CacheKey("en"), $"{name}.json");
 		var errors = new List<Exception>();
-		foreach (var url in language.Equals("en", StringComparison.OrdinalIgnoreCase)
-			? new[] { $"{baseUrl}/{name}.json" }
-			: new[] { $"{baseUrl}/{name}.json", $"{englishBaseUrl}/{name}.json" })
+		foreach (var source in language.Equals("en", StringComparison.OrdinalIgnoreCase)
+			? new[] { (Url: $"{baseUrl}/{name}.json", Path: path) }
+			: new[] { (Url: $"{baseUrl}/{name}.json", Path: path), (Url: $"{englishBaseUrl}/{name}.json", Path: englishPath) })
 		{
 			JsonDocument? downloaded = null;
 			try
 			{
-				var bytes = await http.GetByteArrayAsync(url, cancellationToken);
+				var bytes = await http.GetByteArrayAsync(source.Url, cancellationToken);
 				downloaded = ParseCatalog(name, bytes);
-				await SaveCacheAsync(path, bytes, cancellationToken);
+				await SaveCacheAsync(source.Path, bytes, cancellationToken);
 				return downloaded;
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -158,7 +162,7 @@ public sealed class CatalogService : IDisposable
 			}
 		}
 
-		foreach (var localPath in new[] { path, Path.Combine(fallbackDirectory, $"{name}.json") })
+		foreach (var localPath in new[] { path, englishPath, Path.Combine(fallbackDirectory, $"{name}.json") }.Distinct(StringComparer.Ordinal))
 		{
 			try
 			{
@@ -170,11 +174,14 @@ public sealed class CatalogService : IDisposable
 		throw new AggregateException($"Unable to load the {name} catalog from the API, cache, or bundled data.", errors);
 	}
 
+	private static string CacheKey(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
 	private static async Task SaveCacheAsync(string path, byte[] bytes, CancellationToken cancellationToken)
 	{
 		var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
 		try
 		{
+			Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 			await File.WriteAllBytesAsync(temporaryPath, bytes, cancellationToken);
 			cancellationToken.ThrowIfCancellationRequested();
 			File.Move(temporaryPath, path, overwrite: true);
@@ -395,13 +402,9 @@ public sealed class CatalogService : IDisposable
             if (!kit.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
                 continue;
 
-            var name = ReadString(kit, "name");
-            if (name.StartsWith("StatTrak", StringComparison.Ordinal) && kits.ContainsKey(id))
+            if (CatalogNames.IsStatTrak(kit) && kits.ContainsKey(id))
                 continue;
-            if (name.StartsWith("Music Kit | ", StringComparison.Ordinal))
-                name = name[12..];
-            else if (name.StartsWith("StatTrak™ Music Kit | ", StringComparison.Ordinal))
-                name = name[22..];
+            var name = CatalogNames.ItemName(kit);
 
             kits[id] = new MusicDef(id, name, ReadString(kit, "image"));
         }
@@ -411,12 +414,12 @@ public sealed class CatalogService : IDisposable
     private void ParsePins(JsonElement root)
     {
         var list = new List<PinDef>();
+        var labels = new CatalogNames.PinLabels(root);
         foreach (var item in root.EnumerateArray())
         {
             if (!item.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
                 continue;
-            var name = ReadString(item, "name");
-            list.Add(new PinDef(id, name, GetPinMenuGroup(name), ReadString(item, "image")));
+            list.Add(new PinDef(id, labels.Name(item), CatalogNames.PinGroup(item), ReadString(item, "image")));
         }
         Pins = list.OrderBy(item => item.Name).ToList();
     }
@@ -428,9 +431,7 @@ public sealed class CatalogService : IDisposable
         {
             if (!item.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
                 continue;
-            var name = ReadString(item, "name");
-            if (name.StartsWith("Sticker | ", StringComparison.Ordinal))
-                name = name[10..];
+            var name = CatalogNames.ItemName(item);
             list.Add(new StickerDef(id, name, ReadString(item, "image")));
         }
         Stickers = list.OrderBy(item => item.Name).ToList();
@@ -443,9 +444,7 @@ public sealed class CatalogService : IDisposable
         {
             if (!item.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
                 continue;
-            var name = ReadString(item, "name");
-            if (name.StartsWith("Charm | ", StringComparison.Ordinal))
-                name = name[8..];
+            var name = CatalogNames.ItemName(item);
             list.Add(new CharmDef(id, name));
         }
         Charms = list.OrderBy(item => item.Name).ToList();
@@ -484,33 +483,6 @@ public sealed class CatalogService : IDisposable
             "NZSAS" or "SAS" => "SAS",
             var group => group
         };
-    }
-
-    private static string GetPinMenuGroup(string name)
-    {
-        if (name.Contains("Pick'Em Trophy", StringComparison.OrdinalIgnoreCase) || name.Contains("Fantasy Trophy", StringComparison.OrdinalIgnoreCase))
-            return "Major Pick'Em / Fantasy";
-        if (name.StartsWith("Champion at ", StringComparison.OrdinalIgnoreCase) || name.StartsWith("Finalist at ", StringComparison.OrdinalIgnoreCase) ||
-            name.StartsWith("Semifinalist at ", StringComparison.OrdinalIgnoreCase) || name.StartsWith("Quarterfinalist at ", StringComparison.OrdinalIgnoreCase))
-            return "Major Trophies";
-        if (name.Contains("Viewer Pass", StringComparison.OrdinalIgnoreCase) || name.Contains("Souvenir Token", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("Souvenir Package", StringComparison.OrdinalIgnoreCase) || IsMajorEventCoin(name))
-            return "Major Viewer Passes / Coins";
-        if (name.Contains("Operation ", StringComparison.OrdinalIgnoreCase)) return "Operations";
-        if (name.Contains("Service Medal", StringComparison.OrdinalIgnoreCase)) return "Service Medals";
-        if (name.Contains("Premier Season", StringComparison.OrdinalIgnoreCase)) return "Premier Medals";
-        if (name.EndsWith("Map Coin", StringComparison.OrdinalIgnoreCase)) return "Workshop Map Coins";
-        if (name.EndsWith(" Pin", StringComparison.OrdinalIgnoreCase)) return "Pins";
-        if (name.EndsWith(" Coin", StringComparison.OrdinalIgnoreCase)) return "Coins";
-        return "Other";
-    }
-
-    private static bool IsMajorEventCoin(string name)
-    {
-        if (!name.Contains(" Coin", StringComparison.OrdinalIgnoreCase))
-            return false;
-        string[] events = ["Katowice", "Berlin", "Stockholm", "Antwerp", "Rio", "Paris", "Copenhagen", "Shanghai", "Austin", "Budapest", "Cologne", "Krakow", "Boston", "London", "Columbus", "Cluj-Napoca", "DreamHack", "ELEAGUE", "FACEIT", "BLAST.tv", "PGL", "StarLadder", "Perfect World", "EMS One", "ESL One", "MLG"];
-        return events.Any(eventName => name.Contains(eventName, StringComparison.OrdinalIgnoreCase));
     }
 
     public void Dispose() => http.Dispose();

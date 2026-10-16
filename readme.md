@@ -15,6 +15,9 @@ A CSSharp plugin for CS2 that gives players full control over how their loadout 
 - Auto skins update after game update
 - Everything is saved per player and per team in MySQL
 
+## Languages
+`en`, `pl`, `zh-CN`, `pt-BR`, `ru`, `es-ES`, `bg`, `cs`, `da`, `nl`, `fi`, `fr`, `de`, `el`, `hu`, `it`, `ja`, `ko`, `es-MX`, `no`, `pt-PT`, `ro`, `sv`, `zh-TW`, `tr`, `uk`, `vi`.
+
 ## Showcase
 
 <table>
@@ -115,7 +118,7 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
 ```
 - Options
 
-1. Bulit-in (Default)
+1. Built-in (Default)
 2. [MenuManagerCS2](https://github.com/NickFox007/MenuManagerCS2) By: `NickFox007`
 3. [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) By: `RRimmer`
 
@@ -141,9 +144,9 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
 ## Default Config
 ```json
 {
-  "ConfigVersion": 6,
+  "ConfigVersion": 7,
   "api": {
-    "base_url": "https://cdn.jsdelivr.net/gh/ByMykel/CSGO-API@main/public/api",
+    "base_url": "https://raw.githubusercontent.com/Staaar0/CSGO-API/refs/heads/main/public/api/",
     "language": "en",
     "timeout_seconds": 15
   },

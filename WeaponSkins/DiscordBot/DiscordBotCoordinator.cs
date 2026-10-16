@@ -242,7 +242,8 @@ public sealed class DiscordBotCoordinator
 			WeaponSkins.PrintDiscordBotConnected,
             steamId => plugin.Links?.WakeSync(steamId),
             plugin.DiscordPermissionsAsync,
-            plugin.Store);
+            plugin.Store,
+            (key, args) => plugin.Text(key, args));
 		botTask = bot.RunAsync(botCancellation.Token);
 	}
 

@@ -373,14 +373,16 @@ public sealed class CatalogService
 				if (!sticker.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
 					continue;
 
-				var name = sticker.GetProperty("name").GetString() ?? "";
-				if (name.StartsWith("Sticker | ", StringComparison.Ordinal))
-					name = name[10..];
+				var name = CatalogNames.ItemName(sticker);
 
 				var tournamentEvent = ReadString(sticker, "tournament_event");
 				var tournamentPlayer = ReadString(sticker, "tournament_player");
+				var tournamentKey = "";
 				if (sticker.TryGetProperty("tournament", out var tournament) && tournament.ValueKind == JsonValueKind.Object)
 				{
+					tournamentKey = CatalogNames.StickerTournamentKey(tournament);
+					if (tournamentEvent.Length == 0)
+						tournamentEvent = ReadString(tournament, "name");
 					if (tournamentEvent.Length == 0)
 						tournamentEvent = ReadString(tournament, "event");
 					if (tournamentPlayer.Length == 0)
@@ -393,18 +395,24 @@ public sealed class CatalogService
 
 				var kind = ReadString(sticker, "type");
 				var capsule = ReadString(sticker, "capsule");
-				if (capsule.Length == 0 && sticker.TryGetProperty("crates", out var crates) && crates.ValueKind == JsonValueKind.Array)
+				var crateId = "";
+				if (sticker.TryGetProperty("crates", out var crates) && crates.ValueKind == JsonValueKind.Array)
 				{
 					foreach (var crate in crates.EnumerateArray())
 					{
 						if (crate.ValueKind != JsonValueKind.Object)
 							continue;
-						capsule = ReadString(crate, "name");
+						if (capsule.Length == 0)
+							capsule = ReadString(crate, "name");
+						crateId = ReadString(crate, "id");
 						break;
 					}
 				}
 
-				stickers.Add(new StickerDef(id, name, tournamentEvent, tournamentPlayer, capsule, kind));
+				var sourceKey = sticker.TryGetProperty("original", out var original) && original.ValueKind == JsonValueKind.Object
+					? ReadString(original, "image_inventory") : "";
+				stickers.Add(new StickerDef(id, name, tournamentEvent, tournamentPlayer, capsule, kind,
+					ReadString(sticker, "effect"), sourceKey, crateId, tournamentKey));
 				names[id] = name;
 			}
 
@@ -477,13 +485,9 @@ public sealed class CatalogService
 				if (!kit.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
 					continue;
 
-				var name = kit.GetProperty("name").GetString() ?? "";
-				if (name.StartsWith("StatTrak", StringComparison.Ordinal) && kits.ContainsKey(id))
+				if (CatalogNames.IsStatTrak(kit) && kits.ContainsKey(id))
 					continue;
-				if (name.StartsWith("Music Kit | ", StringComparison.Ordinal))
-					name = name[12..];
-				else if (name.StartsWith("StatTrak\u2122 Music Kit | ", StringComparison.Ordinal))
-					name = name[22..];
+				var name = CatalogNames.ItemName(kit);
 
 				kits[id] = name;
 				kitImages[id] = ReadString(kit, "image");
@@ -498,14 +502,14 @@ public sealed class CatalogService
 		using (doc)
 		{
 			var pins = new List<PinDef>();
+			var labels = new CatalogNames.PinLabels(doc.RootElement);
 
 			foreach (var item in doc.RootElement.EnumerateArray())
 			{
 				if (!item.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
 					continue;
 
-				var name = item.GetProperty("name").GetString() ?? "";
-				pins.Add(new PinDef(id, name, GetPinMenuGroup(name), ReadString(item, "image")));
+				pins.Add(new PinDef(id, labels.Name(item), CatalogNames.PinGroup(item), ReadString(item, "image")));
 			}
 
 			pins.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.Ordinal));
@@ -544,9 +548,7 @@ public sealed class CatalogService
 				if (!charm.TryGetProperty("def_index", out var def) || !int.TryParse(def.GetString(), out var id))
 					continue;
 
-				var name = charm.GetProperty("name").GetString() ?? "";
-				if (name.StartsWith("Charm | ", StringComparison.Ordinal))
-					name = name[8..];
+				var name = CatalogNames.ItemName(charm);
 
 				charms.Add(new CharmDef(id, name));
 				names[id] = name;
@@ -599,56 +601,6 @@ public sealed class CatalogService
 			"NZSAS" or "SAS" => "SAS",
 			var group => group
 		};
-	}
-
-	private static string GetPinMenuGroup(string name)
-	{
-		if (name.Contains("Pick'Em Trophy", StringComparison.OrdinalIgnoreCase) ||
-			name.Contains("Fantasy Trophy", StringComparison.OrdinalIgnoreCase))
-			return "Major Pick'Em / Fantasy";
-
-		if (name.StartsWith("Champion at ", StringComparison.OrdinalIgnoreCase) ||
-			name.StartsWith("Finalist at ", StringComparison.OrdinalIgnoreCase) ||
-			name.StartsWith("Semifinalist at ", StringComparison.OrdinalIgnoreCase) ||
-			name.StartsWith("Quarterfinalist at ", StringComparison.OrdinalIgnoreCase))
-			return "Major Trophies";
-
-		if (name.Contains("Viewer Pass", StringComparison.OrdinalIgnoreCase) ||
-			name.Contains("Souvenir Token", StringComparison.OrdinalIgnoreCase) ||
-			name.Contains("Souvenir Package", StringComparison.OrdinalIgnoreCase) ||
-			IsMajorEventCoin(name))
-			return "Major Viewer Passes / Coins";
-
-		if (name.Contains("Operation ", StringComparison.OrdinalIgnoreCase))
-			return "Operations";
-		if (name.Contains("Service Medal", StringComparison.OrdinalIgnoreCase))
-			return "Service Medals";
-		if (name.Contains("Premier Season", StringComparison.OrdinalIgnoreCase))
-			return "Premier Medals";
-		if (name.EndsWith("Map Coin", StringComparison.OrdinalIgnoreCase))
-			return "Workshop Map Coins";
-		if (name.EndsWith(" Pin", StringComparison.OrdinalIgnoreCase))
-			return "Pins";
-		if (name.EndsWith(" Coin", StringComparison.OrdinalIgnoreCase))
-			return "Coins";
-
-		return "Other";
-	}
-
-	private static bool IsMajorEventCoin(string name)
-	{
-		if (!name.Contains(" Coin", StringComparison.OrdinalIgnoreCase))
-			return false;
-
-		string[] events =
-		[
-			"Katowice", "Berlin", "Stockholm", "Antwerp", "Rio", "Paris", "Copenhagen",
-			"Shanghai", "Austin", "Budapest", "Cologne", "Krakow", "Boston", "London",
-			"Columbus", "Cluj-Napoca", "DreamHack", "ELEAGUE", "FACEIT", "BLAST.tv",
-			"PGL", "StarLadder", "Perfect World", "EMS One", "ESL One", "MLG"
-		];
-
-		return events.Any(eventName => name.Contains(eventName, StringComparison.OrdinalIgnoreCase));
 	}
 
 }

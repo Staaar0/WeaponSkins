@@ -7,7 +7,7 @@ namespace WeaponSkins;
 public class SkinsConfig : BasePluginConfig
 {
 	[JsonPropertyName("ConfigVersion")]
-	public override int Version { get; set; } = 6;
+	public override int Version { get; set; } = 7;
 
 	[JsonPropertyName("api")]
 	public ApiConfig Api { get; set; } = new();
@@ -65,8 +65,10 @@ public sealed class LinkingMethodConverter : JsonConverter<string>
 
 public class ApiConfig
 {
+	public const string DefaultBaseUrl = "https://raw.githubusercontent.com/Staaar0/CSGO-API/refs/heads/main/public/api/";
+
 	[JsonPropertyName("base_url")]
-	public string BaseUrl { get; set; } = "https://cdn.jsdelivr.net/gh/ByMykel/CSGO-API@main/public/api";
+	public string BaseUrl { get; set; } = DefaultBaseUrl;
 
 	[JsonPropertyName("language")]
 	public string Language { get; set; } = "en";

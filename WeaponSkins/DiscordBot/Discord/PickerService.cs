@@ -34,15 +34,19 @@ public sealed partial class PickerService
     public const int StickerSlots = WeaponSkinsDatabase.ManagedStickerSlots;
     private const int PageSize = 23;
     private readonly CatalogService catalog;
+    private readonly Func<string, object[], string>? translate;
+    private string T(string key, params object[] args) => translate?.Invoke(key, args) ?? DiscordEnglish.Text(key, args);
     private readonly WeaponSkinsDatabase database;
     private readonly CancellationToken cancellationToken;
     private readonly SemaphoreSlim operations;
     private readonly Dictionary<string, Session> sessions = [];
     private readonly object sync = new();
 
-    public PickerService(CatalogService catalog, WeaponSkinsDatabase database, CancellationToken cancellationToken = default, SemaphoreSlim? operations = null)
+    public PickerService(CatalogService catalog, WeaponSkinsDatabase database, CancellationToken cancellationToken = default, SemaphoreSlim? operations = null,
+        Func<string, object[], string>? translate = null)
     {
         this.catalog = catalog;
+        this.translate = translate;
         this.database = database;
         this.cancellationToken = cancellationToken;
         this.operations = operations ?? new SemaphoreSlim(4, 4);
@@ -72,7 +76,7 @@ public sealed partial class PickerService
         if (!string.IsNullOrWhiteSpace(category))
         {
             s.Category = CanonicalCategory(category);
-            if (!Categories.Contains(s.Category)) throw new InvalidOperationException("Unknown weapon category.");
+            if (!Categories.Contains(s.Category)) throw new InvalidOperationException(T("discord.unknown_category"));
             s.Stage = Stage.Weapons;
         }
         return Start(s);
@@ -128,7 +132,7 @@ public sealed partial class PickerService
         var s = Find(component.Data.CustomId, component.User.Id, component.GuildId, out var action, out var revision);
         if (s == null)
         {
-            await component.RespondAsync("This menu expired. Run the command again.", ephemeral: true);
+            await component.RespondAsync(T("discord.menu_expired"), ephemeral: true);
             return;
         }
         var value = select ? component.Data.Values.FirstOrDefault() ?? "" : "";
@@ -138,13 +142,13 @@ public sealed partial class PickerService
         {
             if (!await s.Gate.WaitAsync(0, cancellationToken))
             {
-                await component.RespondAsync("This menu is updating. Try again in a moment.", ephemeral: true);
+                await component.RespondAsync(T("discord.menu_updating"), ephemeral: true);
                 return;
             }
             try
             {
                 if (!StillCurrent(s, revision))
-                    await component.RespondAsync("That menu changed. Use its latest controls.", ephemeral: true);
+                    await component.RespondAsync(T("discord.menu_changed"), ephemeral: true);
                 else
                     await component.RespondWithModalAsync(BuildModal(s, action));
             }
@@ -158,7 +162,7 @@ public sealed partial class PickerService
         {
             if (!StillCurrent(s, revision))
             {
-                await component.FollowupAsync("That menu changed or was already saved. Use its latest controls.", ephemeral: true);
+                await component.FollowupAsync(T("discord.menu_saved"), ephemeral: true);
                 return;
             }
             var writes = action is "save" or "unlink" or "default" or "clear" ||
@@ -187,7 +191,7 @@ public sealed partial class PickerService
         await modal.DeferAsync();
         if (s == null)
         {
-            await modal.FollowupAsync("This menu expired. Run the command again.", ephemeral: true);
+            await modal.FollowupAsync(T("discord.menu_expired"), ephemeral: true);
             return;
         }
         await s.Gate.WaitAsync(cancellationToken);
@@ -195,7 +199,7 @@ public sealed partial class PickerService
         {
             if (!StillCurrent(s, revision))
             {
-                await modal.FollowupAsync("That menu changed. Open the control again.", ephemeral: true);
+                await modal.FollowupAsync(T("discord.control_reopen"), ephemeral: true);
                 return;
             }
             var value = modal.Data.Components.FirstOrDefault(x => x.CustomId == "value")?.Value?.Trim() ?? "";
@@ -204,16 +208,16 @@ public sealed partial class PickerService
                 case "search" when Searchable(s): s.Filter = Short(value, 100); s.Page = 0; break;
                 case "seed" when s.Stage == Stage.Preview:
                     if (!int.TryParse(value, out var seed) || seed is < 0 or > 1000)
-                        throw new InvalidOperationException("Seed / Pattern must be from 0 to 1000.");
+                        throw new InvalidOperationException(T("discord.seed_invalid"));
                     s.Seed = seed; break;
                 case "tag" when s.Stage == Stage.Preview:
                     s.NameTag = value == "-" ? "" : Short(value, 64); break;
                 case "wear" when s.Stage == Stage.Preview:
                     if (!float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var wear) ||
                         !float.IsFinite(wear) || wear is < 0 or > 1)
-                        throw new InvalidOperationException("Float must be a number from 0 to 1.");
+                        throw new InvalidOperationException(T("discord.wear_invalid"));
                     s.Wear = EffectiveWear(s, wear); break;
-                default: throw new InvalidOperationException("This control is no longer available.");
+                default: throw new InvalidOperationException(T("discord.control_unavailable"));
             }
             s.Revision++;
             await Show(modal, Render(s));
@@ -229,14 +233,14 @@ public sealed partial class PickerService
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (await database.GetSteamIdAsync(s.UserId) != s.SteamId)
-            throw new InvalidOperationException("Your linked account changed. Run the command again.");
+            throw new InvalidOperationException(T("discord.account_changed"));
         if (stickers && !(await database.PermissionsAsync(s.SteamId)).Stickers)
-            throw new InvalidOperationException("Stickers are disabled for your account by WeaponSkins (VIP permission required).");
+            throw new InvalidOperationException(T("discord.stickers_vip"));
     }
 
     private async Task<PickerView?> Act(Session s, string action, string value)
     {
-        if (action == "cancel") return Finish(s, "WeaponSkins", "Menu closed.", success: false);
+        if (action == "cancel") return Finish(s, "WeaponSkins", T("discord.menu_closed"), success: false);
         if (action == "back")
         {
             s.Page = 0; s.Filter = "";
@@ -245,7 +249,7 @@ public sealed partial class PickerService
         }
         if (action == "wear" && s.Stage == Stage.Preview)
         {
-            if (!WearOptions.Any(x => x.Value == value)) throw new InvalidOperationException("Select a valid wear.");
+            if (!WearOptions.Any(x => x.Value == value)) throw new InvalidOperationException(T("discord.wear_select"));
             s.Wear = EffectiveWear(s, float.Parse(value, CultureInfo.InvariantCulture)); return null;
         }
         if (action == "st" && s.Stage == Stage.Preview)
@@ -264,13 +268,13 @@ public sealed partial class PickerService
         {
             await CheckWriteAccess(s);
             await database.UnlinkAsync(s.UserId);
-            return Finish(s, "Account unlinked", "Your Steam account has been unlinked from WeaponSkins. Your saved skins stay.");
+            return Finish(s, T("discord.account_unlinked"), T("discord.unlinked_details"));
         }
         if (action == "select")
         {
             if (value is "__next" or "__prev") { s.Page += value == "__next" ? 1 : -1; return null; }
             var choice = Choices(s).FirstOrDefault(x => x.Value == value)
-                ?? throw new InvalidOperationException("This selection is no longer available.");
+                ?? throw new InvalidOperationException(T("discord.selection_unavailable"));
             s.Page = 0; s.Filter = "";
             switch (s.Stage)
             {
@@ -297,34 +301,34 @@ public sealed partial class PickerService
             case Stage.Paints when action == "default":
                 if (s.Kind == ItemKind.Glove) await database.SetGlovesAsync(s.SteamId, s.Team, s.DefIndex, null);
                 else await database.SetSkinAsync(s.SteamId, s.Team, s.DefIndex, null, s.Kind == ItemKind.Knife);
-                return Finish(s, "Loadout saved", "Default restored.");
+                return Finish(s, T("discord.loadout_saved"), T("discord.default_restored"));
             case Stage.Weapons when action == "default":
                 if (s.Category == "Knifes") await database.ResetKnifeAsync(s.SteamId, s.Team);
                 else if (s.Category == "Gloves") await database.SetGlovesAsync(s.SteamId, s.Team, 0, null);
                 else return null;
-                return Finish(s, "Loadout saved", "Default restored.");
+                return Finish(s, T("discord.loadout_saved"), T("discord.default_restored"));
             case Stage.Agents:
                 var side = s.Team == TeamTarget.CounterTerrorist ? 3 : 2;
                 var agent = action == "default" ? null : (side == 3 ? catalog.AgentsCT : catalog.AgentsT)[int.Parse(value[6..])];
                 await database.SetAgentAsync(s.SteamId, side, agent);
                 // For Both, handle T first, then CT.
                 if (s.Team == TeamTarget.Both) { s.Team = TeamTarget.CounterTerrorist; return null; }
-                return Finish(s, "", $"Your agent for team **{TeamLabel(s.Team)}** has been successfully set to `{Inline(agent?.DisplayName ?? "Default")}`.", agent?.Image ?? "");
+                return Finish(s, "", T("discord.agent_saved", TeamLabel(s.Team), Inline(agent?.DisplayName ?? T("menu.default"))), agent?.Image ?? "");
             case Stage.Music:
                 var music = action == "default" ? null : catalog.MusicKits.First(x => x.Id.ToString() == value);
                 await database.SetMusicAsync(s.SteamId, music?.Id ?? 0);
-                return Finish(s, "Loadout saved", music?.Name ?? "Default", music?.Image ?? "");
+                return Finish(s, T("discord.loadout_saved"), music?.Name ?? T("menu.default"), music?.Image ?? "");
             case Stage.Pins:
                 var pin = action == "default" ? null : catalog.Pins.First(x => x.Id.ToString() == value);
                 await database.SetPinAsync(s.SteamId, pin?.Id ?? 0);
-                return Finish(s, "Loadout saved", pin?.Name ?? "Default", pin?.Image ?? "");
+                return Finish(s, T("discord.loadout_saved"), pin?.Name ?? T("menu.default"), pin?.Image ?? "");
             case Stage.Stickers:
                 var sticker = action == "select" ? catalog.Stickers.First(x => x.Id.ToString() == value) : null;
                 var changed = action == "clear"
                     ? await database.ClearStickersAsync(s.SteamId, s.Team, s.DefIndex)
                     : await database.SetStickersAsync(s.SteamId, s.Team, s.DefIndex, s.Slots, sticker);
-                if (!changed) throw new InvalidOperationException("Select a finish for this weapon and team first.");
-                return Finish(s, "Loadout saved", action == "clear" ? "All stickers and charm removed" : sticker?.Name ?? "Selected sticker slots cleared", sticker?.Image ?? "");
+                if (!changed) throw new InvalidOperationException(T("discord.skin_required"));
+                return Finish(s, T("discord.loadout_saved"), action == "clear" ? T("discord.decorations_removed") : sticker?.Name ?? T("discord.slots_cleared"), sticker?.Image ?? "");
         }
         return null;
     }
@@ -337,8 +341,9 @@ public sealed partial class PickerService
     }
     private PickerView FinishBuild(Session s)
     {
-        var text = $"> Your skin for the weapon **{catalog.WeaponName(s.DefIndex)}** (Team: {TeamLabel(s.Team)}) has been successfully set to `{Inline(PaintName(s))}`\n\n" +
-            $"> Wear: `{s.Wear.ToString("0.######", CultureInfo.InvariantCulture)}`\n> Pattern / Seed: `{s.Seed}`\n> Nametag: `{Inline(s.NameTag.Length == 0 ? "Not Set" : s.NameTag)}`\n> Stattrak: {StatTrakText(s)}";
+        var text = T("discord.build_saved", catalog.WeaponName(s.DefIndex), TeamLabel(s.Team), Inline(PaintName(s)),
+            s.Wear.ToString("0.######", CultureInfo.InvariantCulture), s.Seed,
+            Inline(s.NameTag.Length == 0 ? T("discord.not_set") : s.NameTag), StatTrakText(s));
         var result = Finish(s, "", "");
         return result with { Embed = Embed("", text, "#66ff66", s.Paint?.Image ?? "") };
     }

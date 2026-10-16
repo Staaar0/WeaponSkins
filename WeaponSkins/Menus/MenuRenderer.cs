@@ -20,7 +20,7 @@ public sealed class MenuRenderer
 
 	private readonly List<KeyValuePair<int, MenuSession>> snapshot = [];
 	private readonly MenuConfig config;
-	private readonly IStringLocalizer localizer;
+	private readonly Func<string, string> text;
 	private readonly StringBuilder builder = new(1024);
 	private readonly MenuItem backItem;
 	private NativeMenuProvider? api;
@@ -33,11 +33,11 @@ public sealed class MenuRenderer
 		api = menuApi;
 	}
 
-	public MenuRenderer(MenuConfig config, IStringLocalizer localizer)
+	public MenuRenderer(MenuConfig config, IStringLocalizer localizer, Func<string, string>? translate = null)
 	{
 		this.config = config;
-		this.localizer = localizer;
-		backItem = new MenuItem(localizer["menu.back"].Value, (player, session) => Back(player, session));
+		text = translate ?? (key => localizer[key].Value);
+		backItem = new MenuItem(text("menu.back"), (player, session) => Back(player, session));
 	}
 
 	public MenuSession? SessionOf(CCSPlayerController player)
@@ -325,7 +325,7 @@ public sealed class MenuRenderer
 		{
 			builder.Append("<b><font color='#D4AF37'>").Append(WebUtility.HtmlEncode(menu.Title)).Append("</font></b><br>");
 			builder.Append("<font color='#FFFFFF'>").Append(WebUtility.HtmlEncode(session.Input.Prompt)).Append("</font><br>");
-			builder.Append("<font color='#808080'>").Append(localizer["menu.input_hint"]).Append("</font>");
+			builder.Append("<font color='#808080'>").Append(WebUtility.HtmlEncode(text("menu.input_hint"))).Append("</font>");
 			return builder.ToString();
 		}
 
@@ -358,7 +358,7 @@ public sealed class MenuRenderer
 			builder.Append("<br>");
 		}
 
-		builder.Append("<font color='#606060'>").Append(localizer["menu.footer"]).Append("</font>");
+		builder.Append("<font color='#606060'>").Append(WebUtility.HtmlEncode(text("menu.footer"))).Append("</font>");
 		return builder.ToString();
 	}
 
@@ -464,7 +464,7 @@ public sealed class MenuRenderer
 		if (item.Value != null)
 			return item.Value;
 		if (item.Toggle is bool on)
-			return localizer[on ? "menu.on" : "menu.off"].Value;
+			return text(on ? "menu.on" : "menu.off");
 		return null;
 	}
 

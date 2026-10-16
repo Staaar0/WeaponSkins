@@ -13,6 +13,9 @@ public sealed partial class BotApp
 {
 	private const string Branding = "WeaponSkins | By ✪ Stαr";
 	private readonly string token;
+    private readonly Func<string, object[], string>? translate;
+    private string T(string key, params object[] args) => translate?.Invoke(key, args) ?? DiscordEnglish.Text(key, args);
+    private string Description(string key) => DiscordText.Short(T(key), 100);
 	private readonly global::WeaponSkins.Database sourceDatabase;
 	private readonly string moduleDirectory;
 	private readonly global::WeaponSkins.ApiConfig apiConfig;
@@ -65,9 +68,9 @@ public sealed partial class BotApp
         "stattrak", "st", "stickers", "sticker", "g", "gen"
     };
 
-    private const string StickersDenied = "stickers are available only to VIP members.";
+    private string StickersDenied => T("discord.stickers_denied");
 
-    private const string GenDenied = "Gen codes are available only to VIP members.";
+    private string GenDenied => T("discord.gen_denied");
 
 	public BotApp(
 		string token,
@@ -78,7 +81,8 @@ public sealed partial class BotApp
 		Action connected,
         Action<ulong> loadoutChanged,
         Func<ulong, CancellationToken, Task<WeaponSkinsDatabase.Permissions>> livePermissions,
-        global::WeaponSkins.LoadoutStore? mutationStore = null)
+        global::WeaponSkins.LoadoutStore? mutationStore = null,
+        Func<string, object[], string>? translate = null)
 	{
 		this.token = token;
 		sourceDatabase = database;
@@ -89,6 +93,7 @@ public sealed partial class BotApp
         this.loadoutChanged = loadoutChanged;
         this.livePermissions = livePermissions;
         this.mutationStore = mutationStore;
+        this.translate = translate ?? new global::WeaponSkins.PluginTranslations(moduleDirectory, apiConfig.Language, logger).Text;
 	}
 
 	public async Task RunAsync(CancellationToken cancellationToken)
@@ -98,7 +103,7 @@ public sealed partial class BotApp
 		try
 		{
             dispatcher = new InteractionDispatcher(logger, this.cancellationToken);
-            database = new WeaponSkinsDatabase(sourceDatabase, OnLoadoutChanged, this.cancellationToken, livePermissions, mutationStore);
+            database = new WeaponSkinsDatabase(sourceDatabase, OnLoadoutChanged, this.cancellationToken, livePermissions, mutationStore, translate);
             ownedWeapons = new OwnedWeaponCache(database.GetOwnedWeaponsAsync,
                 ex => logger.LogWarning(ex, "WeaponSkinsBOT could not refresh weapon suggestions"), this.cancellationToken);
 			catalog = new CatalogService(
@@ -106,7 +111,7 @@ public sealed partial class BotApp
 				Path.Combine(moduleDirectory, "Data"),
 				apiConfig);
 			await catalog.LoadAsync(this.cancellationToken);
-			picker = new PickerService(catalog, database, this.cancellationToken, botOperations);
+			picker = new PickerService(catalog, database, this.cancellationToken, botOperations, translate);
 
 			client = new DiscordSocketClient(new DiscordSocketConfig
 			{
@@ -366,10 +371,10 @@ public sealed partial class BotApp
             var opener = await message.Channel.SendMessageAsync(
                 embed: new EmbedBuilder()
                     .WithTitle("WeaponSkins")
-                    .WithDescription($"{message.Author.Mention} press **Open** for `!{command}`. Only you will see it.")
+                    .WithDescription(T("discord.open_prompt", message.Author.Mention, command))
                     .WithFooter(Branding)
                     .Build(),
-                components: new ComponentBuilder().WithButton("Open", $"open:{token}", ButtonStyle.Primary).Build(),
+                components: new ComponentBuilder().WithButton(T("discord.open"), $"open:{token}", ButtonStyle.Primary).Build(),
                 options: new RequestOptions { CancelToken = cancellationToken });
 
             var cleanup = ExpireOpener(token, opener);
@@ -424,7 +429,7 @@ public sealed partial class BotApp
         {
             if (cancellationToken.IsCancellationRequested) return;
             logger.LogError(ex, "WeaponSkinsBOT prefix command {Command} failed", job.Command);
-            payload = new Payload(ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.", null, null);
+            payload = new Payload(ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : T("discord.request_failed"), null, null);
         }
 
         await component.FollowupAsync(
@@ -453,11 +458,11 @@ public sealed partial class BotApp
             case "link":
             {
                 if (args.Count < 1)
-                    return Say("Usage: `!link ABCD-1234`, using the code `!link` gives you inside the CS2 server.");
+                    return Say(T("discord.link_usage"));
 				// Limit link attempts while the code is valid.
                 var wait = LinkCooldown(userId);
                 if (wait > 0)
-                    return Say($"Too many link attempts. Wait {wait} seconds and try again.");
+                    return Say(T("discord.link_cooldown", wait));
 
 				var result = await database.CompleteLinkAsync(userId, args[0]);
                 if (result.Success) ownedWeapons.Prime(userId, result.SteamId);
@@ -477,7 +482,7 @@ public sealed partial class BotApp
                 return View(picker.StartUnlink(guildId, userId, context.SteamId));
 
             case "me":
-                return Say($"Linked SteamID: `{context.SteamId}`");
+                return Say(T("discord.linked_steam", context.SteamId));
 
             case "loadout":
                 return await LoadoutPayload(context, 0);
@@ -500,7 +505,7 @@ public sealed partial class BotApp
                 {
                     knife = catalog.FindKnife(string.Join(" ", args));
                     if (knife == null)
-                        return Say("Knife not found. Use `!knife` on its own to choose from the menu.");
+                        return Say(T("discord.knife_not_found"));
                 }
                 return View(picker.StartKnife(guildId, userId, context.SteamId, team, knife));
             }
@@ -526,9 +531,9 @@ public sealed partial class BotApp
             {
                 if (!TryWeaponTeamValue(args, out var weapon, out var team, out var raw) ||
                     !float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var wear) || !float.IsFinite(wear) || wear is < 0 or > 1)
-                    return Say("Usage: `!wear <weapon> [t|ct|both] <0-1>`");
+                    return Say(T("discord.wear_usage"));
                 var ok = await context.Db.SetWearAsync(context.SteamId, TeamFor(weapon, team), weapon.DefIndex, wear, catalog);
-                return Say(ok ? "Wear changed." : "Choose a skin for that weapon first.");
+                return Say(ok ? T("discord.wear_changed") : T("discord.choose_skin"));
             }
 
             case "seed":
@@ -536,35 +541,35 @@ public sealed partial class BotApp
             {
                 if (!TryWeaponTeamValue(args, out var weapon, out var team, out var raw) ||
                     !int.TryParse(raw, out var seed) || seed is < 0 or > 1000)
-                    return Say("Usage: `!seed <weapon> [t|ct|both] <0-1000>`");
+                    return Say(T("discord.seed_usage"));
                 var ok = await context.Db.SetSeedAsync(context.SteamId, TeamFor(weapon, team), weapon.DefIndex, seed);
-                return Say(ok ? "Pattern changed." : "Choose a skin for that weapon first.");
+                return Say(ok ? T("discord.pattern_changed") : T("discord.choose_skin"));
             }
 
             case "nametag":
             case "tag":
             {
                 if (!TryWeaponTeamValue(args, out var weapon, out var team, out var text))
-                    return Say("Usage: `!nametag <weapon> [t|ct|both] <text|->` (quote names with spaces)");
+                    return Say(T("discord.nametag_usage"));
                 var tag = text == "-" ? null : text.Length > 64 ? text[..64] : text;
                 var ok = await context.Db.SetNameTagAsync(context.SteamId, TeamFor(weapon, team), weapon.DefIndex, tag);
-                return Say(ok ? "Name tag changed." : "Choose a skin for that weapon first.");
+                return Say(ok ? T("discord.nametag_changed") : T("discord.choose_skin"));
             }
 
             case "stattrak":
             case "st":
             {
                 if (!TryWeaponTeamValue(args, out var weapon, out var team, out var raw) || !TryBool(raw, out var enabled))
-                    return Say("Usage: `!stattrak <weapon> [t|ct|both] <on|off>`");
+                    return Say(T("discord.stattrak_usage"));
                 var ok = await context.Db.SetStatTrakAsync(context.SteamId, TeamFor(weapon, team), weapon.DefIndex, enabled);
-                return Say(ok ? $"StatTrak {(enabled ? "enabled" : "disabled")}." : "Choose a skin for that weapon first.");
+                return Say(ok ? (enabled ? T("discord.stattrak_enabled") : T("discord.stattrak_disabled")) : T("discord.choose_skin"));
             }
 
             case "stickers":
             case "sticker":
             {
                 if (args.Count == 0)
-                    return Say($"Usage: `!stickers <weapon> [t|ct|both] [slot 1-{PickerService.StickerSlots}|all] [search]`");
+                    return Say(T("discord.stickers_usage", PickerService.StickerSlots));
 
                 if (!(await context.Db.PermissionsAsync(context.SteamId)).Stickers)
                     return Say(StickersDenied);
@@ -575,7 +580,7 @@ public sealed partial class BotApp
                 var weaponText = args.Count > 0 ? string.Join(" ", args) : "";
                 var weapon = catalog.FindWeapon(weaponText);
                 if (weapon == null)
-                    return Say("Weapon not found, or it does not take stickers.");
+                    return Say(T("discord.weapon_not_found"));
                 return View(picker.StartStickers(guildId, userId, context.SteamId, TeamFor(weapon, team), weapon.DefIndex, slot, ""));
             }
 
@@ -583,7 +588,7 @@ public sealed partial class BotApp
             case "gen":
             {
                 if (args.Count == 0)
-                    return Say("Usage: `!g [t|ct|both] <inspect code>`");
+                    return Say(T("discord.gen_usage"));
                 var team = TeamTarget.Both;
                 if (TeamTargetExtensions.TryParse(args[0], out var parsed))
                 {
@@ -591,7 +596,7 @@ public sealed partial class BotApp
                     args.RemoveAt(0);
                 }
                 if (!SharedEconPreview.TryParse(string.Join(" ", args), out var item))
-                    return Say("Invalid inspect code.");
+                    return Say(T("discord.inspect_invalid"));
 
                 // Check gen-code access and sticker access separately.
                 var allowed = await context.Db.PermissionsAsync(context.SteamId);
@@ -600,11 +605,11 @@ public sealed partial class BotApp
 
                 var stripped = !allowed.Stickers && (item.Stickers.Count > 0 || item.Keychains.Count > 0);
                 var name = await context.Db.ApplyGenAsync(context.SteamId, team, item, catalog, allowed.Stickers);
-                return Say($"Applied **{name}**." + (stripped ? " | Stickers and charms were skipped, They are disabled on the server." : ""));
+                return Say(T("discord.applied", name) + (stripped ? T("discord.decorations_skipped") : ""));
             }
         }
 
-        return Say("Unknown command. Try `!help`.");
+        return Say(T("discord.unknown_command"));
     }
 
     private readonly Dictionary<ulong, List<DateTimeOffset>> linkAttempts = [];
@@ -692,17 +697,17 @@ public sealed partial class BotApp
         page = Math.Clamp(page, 0, pages.Count - 1);
 
         var embed = new EmbedBuilder()
-            .WithTitle("Your loadout")
+            .WithTitle(T("discord.your_loadout"))
             .WithDescription($"SteamID `{context.SteamId}`\n\n{string.Join("\n", pages[page])}")
-			.WithFooter($"Page {page + 1}/{pages.Count} • {entries.Count} item(s) • {Branding}")
+			.WithFooter(T("discord.loadout_footer", page + 1, pages.Count, entries.Count, Branding))
             .Build();
 
         if (pages.Count == 1)
             return new Payload(null, embed, null);
 
         var components = new ComponentBuilder()
-            .WithButton("Previous", $"loadout:{page - 1}", ButtonStyle.Secondary, disabled: page <= 0)
-            .WithButton("Next", $"loadout:{page + 1}", ButtonStyle.Secondary, disabled: page >= pages.Count - 1)
+            .WithButton(T("discord.previous"), $"loadout:{page - 1}", ButtonStyle.Secondary, disabled: page <= 0)
+            .WithButton(T("discord.next"), $"loadout:{page + 1}", ButtonStyle.Secondary, disabled: page >= pages.Count - 1)
             .Build();
 
         return new Payload(null, embed, components);
@@ -718,18 +723,18 @@ public sealed partial class BotApp
             var before = entries.Count;
 
             if (data.Knives.TryGetValue(team, out var knife) && knife > 0)
-                entries.Add((section, $"**Knife** {catalog.WeaponName(knife)}"));
+                entries.Add((section, $"**{T("menu.knife")}** {catalog.WeaponName(knife)}"));
 
             if (data.Gloves.TryGetValue(team, out var gloves) && gloves.Def > 0)
             {
                 var paint = catalog.FindPaint(gloves.Def, gloves.Paint);
-                entries.Add((section, $"**Gloves** {catalog.WeaponName(gloves.Def)}{(paint == null ? "" : $" | {paint.Name}")}"));
+                entries.Add((section, $"**{T("menu.gloves")}** {catalog.WeaponName(gloves.Def)}{(paint == null ? "" : $" | {paint.Name}")}"));
             }
 
             if (data.Agents.TryGetValue(team, out var model) && model.Length > 0)
             {
                 var agent = (team == 2 ? catalog.AgentsT : catalog.AgentsCT).FirstOrDefault(item => item.Model == model);
-                entries.Add((section, $"**Agent** {agent?.Name ?? model}"));
+                entries.Add((section, $"**{T("discord.agent")}** {agent?.Name ?? model}"));
             }
 
             if (data.Weapons.TryGetValue(team, out var weapons))
@@ -742,18 +747,18 @@ public sealed partial class BotApp
             }
 
             if (entries.Count == before)
-                entries.Add((section, "*nothing set*"));
+                entries.Add((section, T("discord.nothing_set")));
         }
 
         var music = catalog.MusicKits.FirstOrDefault(item => item.Id == data.Music);
         var pin = catalog.Pins.FirstOrDefault(item => item.Id == data.Pin);
-        entries.Add(("Profile", $"**Music** {music?.Name ?? "default"}"));
-        entries.Add(("Profile", $"**Pin** {pin?.Name ?? "none"}"));
+        entries.Add((T("discord.profile"), $"**{T("menu.music")}** {music?.Name ?? T("menu.default")}"));
+        entries.Add((T("discord.profile"), $"**{T("menu.pins")}** {pin?.Name ?? T("discord.none")}"));
         return entries;
     }
 
     // Splits lines into pages and repeats section headings.
-    private static List<List<string>> Paginate(List<(string Section, string Line)> entries, int perPage)
+    private List<List<string>> Paginate(List<(string Section, string Line)> entries, int perPage)
     {
         var pages = new List<List<string>>();
         var current = new List<string>();
@@ -780,7 +785,7 @@ public sealed partial class BotApp
         if (current.Count > 0)
             pages.Add(current);
         if (pages.Count == 0)
-            pages.Add(["*nothing set*"]);
+            pages.Add([T("discord.nothing_set")]);
 
         return pages;
     }
@@ -789,14 +794,14 @@ public sealed partial class BotApp
     {
         if (command.GuildId == null)
         {
-            await command.RespondAsync("Use this command inside a Discord server.", ephemeral: true);
+            await command.RespondAsync(T("discord.guild_only"), ephemeral: true);
             return;
         }
 
 		var guildId = command.GuildId.Value;
 		if (!IsActiveGuild(guildId))
 		{
-			await command.RespondAsync("This WeaponSkins bot is assigned to another Discord server.", ephemeral: true);
+			await command.RespondAsync(T("discord.another_server"), ephemeral: true);
 			return;
 		}
 
@@ -832,7 +837,7 @@ public sealed partial class BotApp
         {
             if (cancellationToken.IsCancellationRequested) return;
             logger.LogError(ex, "WeaponSkinsBOT slash command {Command} failed", command.CommandName);
-            var error = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.";
+            var error = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : T("discord.request_failed");
             if (command.HasResponded)
                 await command.FollowupAsync(error, ephemeral: true);
             else
@@ -840,7 +845,7 @@ public sealed partial class BotApp
         }
     }
 
-    private static List<string> SlashArgs(SocketSlashCommand command, params string[] names)
+    private List<string> SlashArgs(SocketSlashCommand command, params string[] names)
     {
         var args = new List<string>();
         foreach (var name in names)
@@ -908,13 +913,13 @@ public sealed partial class BotApp
 
             if (job == null)
             {
-                await component.RespondAsync("That menu expired, type the command again.", ephemeral: true);
+                await component.RespondAsync(T("discord.opener_expired"), ephemeral: true);
                 return;
             }
 
             if (job.UserId != component.User.Id)
             {
-                await component.RespondAsync("That menu belongs to someone else, type the command yourself.", ephemeral: true);
+                await component.RespondAsync(T("discord.opener_owned"), ephemeral: true);
                 return;
             }
 
@@ -944,7 +949,7 @@ public sealed partial class BotApp
 	{
 		var steamId = await database.GetSteamIdAsync(discordId);
 		if (!steamId.HasValue)
-			return new Linked(false, guildId, 0, database, "Your Steam account is not linked. Join the CS2 server, type `!link`, then use `/link CODE` here.");
+			return new Linked(false, guildId, 0, database, T("discord.link_required"));
 		ownedWeapons.Prime(discordId, steamId.Value);
 		return new Linked(true, guildId, steamId.Value, database, "");
 	}
@@ -1004,82 +1009,82 @@ public sealed partial class BotApp
         return false;
     }
 
-    private static string TextOption(SocketSlashCommand command, string name, bool required = true)
+    private string TextOption(SocketSlashCommand command, string name, bool required = true)
     {
         var option = command.Data.Options.FirstOrDefault(item => item.Name == name);
         if (option == null || option.Value == null)
         {
             if (required)
-                throw new InvalidOperationException($"Missing `{name}`.");
+                throw new InvalidOperationException(T("discord.missing_option", name));
             return "";
         }
         return Convert.ToString(option.Value, CultureInfo.InvariantCulture) ?? "";
     }
 
-	private static Embed HelpEmbed() => new EmbedBuilder()
+	private Embed HelpEmbed() => new EmbedBuilder()
         .WithTitle("WeaponSkins_Bot")
-        .WithDescription("Link your Steam account and manage WeaponSkins from Discord. Slash commands and `!` commands are supported.")
-        .AddField("Link", "Join CS2 → type `!link` → use `/link CODE` or `!link CODE` here. `/unlink` undoes it.")
-        .AddField("Cosmetics", "`/skins`, `/knife`, `/gloves`, `/agents`, `/music`, `/pins`, `/stickers`, `/loadout`")
-		.AddField("Settings", "`/wear`, `/seed`, `/nametag`, `/stattrak`, `/gen`\nChoose a category, weapon and skin. Edit wear, pattern, nametag and StatTrak in the preview, then press Save. Use /stickers for sticker slots, search and removal.")
+        .WithDescription(T("discord.help_intro"))
+        .AddField(T("discord.link"), T("discord.help_link"))
+        .AddField(T("discord.cosmetics"), "`/skins`, `/knife`, `/gloves`, `/agents`, `/music`, `/pins`, `/stickers`, `/loadout`")
+		.AddField(T("discord.settings"), T("discord.help_settings"))
 		.WithFooter(Branding)
 		.Build();
 
     private IEnumerable<SlashCommandBuilder> BuildSlashCommands()
     {
-		yield return new SlashCommandBuilder().WithName("help").WithDescription("Show WeaponSkins_Bot commands");
-        yield return new SlashCommandBuilder().WithName("me").WithDescription("Show your linked SteamID");
-        yield return new SlashCommandBuilder().WithName("loadout").WithDescription("Show everything you have equipped");
-        yield return new SlashCommandBuilder().WithName("link").WithDescription("Link your Steam account")
-            .AddOption(new SlashCommandOptionBuilder().WithName("code").WithDescription("Code from !link in CS2").WithType(ApplicationCommandOptionType.String).WithRequired(true));
-        yield return new SlashCommandBuilder().WithName("unlink").WithDescription("Unlink your Steam account");
+		yield return new SlashCommandBuilder().WithName("help").WithDescription(Description("discord.desc_help"));
+        yield return new SlashCommandBuilder().WithName("me").WithDescription(Description("discord.desc_me"));
+        yield return new SlashCommandBuilder().WithName("loadout").WithDescription(Description("discord.desc_loadout"));
+        yield return new SlashCommandBuilder().WithName("link").WithDescription(Description("discord.desc_link"))
+            .AddOption(new SlashCommandOptionBuilder().WithName("code").WithDescription(Description("discord.desc_code")).WithType(ApplicationCommandOptionType.String).WithRequired(true));
+        yield return new SlashCommandBuilder().WithName("unlink").WithDescription(Description("discord.desc_unlink"));
 
         foreach (var alias in new[] { "skins", "skin" })
             yield return SkinCommand(alias);
         foreach (var alias in new[] { "knife", "knives", "knifes" })
             yield return KnifeCommand(alias);
 
-        yield return TeamOnly("gloves", "Choose gloves");
-        yield return TeamOnly("agents", "Choose an agent", false);
-        yield return new SlashCommandBuilder().WithName("music").WithDescription("Choose a music kit");
-        yield return new SlashCommandBuilder().WithName("pins").WithDescription("Choose a pin");
-        yield return new SlashCommandBuilder().WithName("pin").WithDescription("Choose a pin");
-        yield return WeaponValueCommand("wear", "Change skin wear", ApplicationCommandOptionType.Number, "Wear from 0 to 1");
-        yield return WeaponValueCommand("seed", "Change skin pattern", ApplicationCommandOptionType.Integer, "Pattern from 0 to 1000");
+        yield return TeamOnly("gloves", T("discord.desc_gloves"));
+        yield return TeamOnly("agents", T("discord.desc_agents"), false);
+        yield return new SlashCommandBuilder().WithName("music").WithDescription(Description("discord.desc_music"));
+        yield return new SlashCommandBuilder().WithName("pins").WithDescription(Description("discord.desc_pins"));
+        yield return new SlashCommandBuilder().WithName("pin").WithDescription(Description("discord.desc_pins"));
+        yield return WeaponValueCommand("wear", T("discord.desc_wear"), ApplicationCommandOptionType.Number, T("discord.desc_wear_value"));
+        yield return WeaponValueCommand("seed", T("discord.desc_seed"), ApplicationCommandOptionType.Integer, T("discord.desc_seed_value"));
 
-        yield return WeaponTeamBase("nametag", "Change a weapon name tag")
-            .AddOption(new SlashCommandOptionBuilder().WithName("text").WithDescription("Name tag or - to remove").WithType(ApplicationCommandOptionType.String).WithRequired(true));
-        yield return WeaponTeamBase("stattrak", "Enable or disable StatTrak")
-            .AddOption(new SlashCommandOptionBuilder().WithName("enabled").WithDescription("Enable StatTrak").WithType(ApplicationCommandOptionType.Boolean).WithRequired(true));
-        yield return WeaponTeamBase("stickers", "Choose stickers, with search in the menu");
-        yield return new SlashCommandBuilder().WithName("gen").WithDescription("Apply a CS2 inspect code")
-            .AddOption(new SlashCommandOptionBuilder().WithName("code").WithDescription("Inspect code or preview URL").WithType(ApplicationCommandOptionType.String).WithRequired(true));
+        yield return WeaponTeamBase("nametag", T("discord.desc_nametag"))
+            .AddOption(new SlashCommandOptionBuilder().WithName("text").WithDescription(Description("discord.desc_tag_value")).WithType(ApplicationCommandOptionType.String).WithRequired(true));
+        yield return WeaponTeamBase("stattrak", T("discord.desc_stattrak"))
+            .AddOption(new SlashCommandOptionBuilder().WithName("enabled").WithDescription(Description("discord.desc_stattrak_value")).WithType(ApplicationCommandOptionType.Boolean).WithRequired(true));
+        yield return WeaponTeamBase("stickers", T("discord.desc_stickers"));
+        yield return new SlashCommandBuilder().WithName("gen").WithDescription(Description("discord.desc_gen"))
+            .AddOption(new SlashCommandOptionBuilder().WithName("code").WithDescription(Description("discord.desc_inspect_value")).WithType(ApplicationCommandOptionType.String).WithRequired(true));
     }
 
-    private static SlashCommandBuilder SkinCommand(string name) =>
-        new SlashCommandBuilder().WithName(name).WithDescription("Choose a weapon skin").AddOption(TeamOption(false));
+    private SlashCommandBuilder SkinCommand(string name) =>
+        new SlashCommandBuilder().WithName(name).WithDescription(Description("discord.desc_skins")).AddOption(TeamOption(false));
 
-    private static SlashCommandBuilder KnifeCommand(string name) =>
-        new SlashCommandBuilder().WithName(name).WithDescription("Choose a knife and skin").AddOption(TeamOption());
+    private SlashCommandBuilder KnifeCommand(string name) =>
+        new SlashCommandBuilder().WithName(name).WithDescription(Description("discord.desc_knife")).AddOption(TeamOption());
 
-    private static SlashCommandBuilder TeamOnly(string name, string description, bool both = true) =>
-        new SlashCommandBuilder().WithName(name).WithDescription(description).AddOption(TeamOption(both));
+    private SlashCommandBuilder TeamOnly(string name, string description, bool both = true) =>
+        new SlashCommandBuilder().WithName(name).WithDescription(DiscordText.Short(description, 100)).AddOption(TeamOption(both));
 
-    private static SlashCommandBuilder WeaponTeamBase(string name, string description) =>
-        new SlashCommandBuilder().WithName(name).WithDescription(description)
-            .AddOption(new SlashCommandOptionBuilder().WithName("weapon").WithDescription("Choose one of your equipped custom skins")
+    private SlashCommandBuilder WeaponTeamBase(string name, string description) =>
+        new SlashCommandBuilder().WithName(name).WithDescription(DiscordText.Short(description, 100))
+            .AddOption(new SlashCommandOptionBuilder().WithName("weapon").WithDescription(Description("discord.desc_weapon_value"))
                 .WithType(ApplicationCommandOptionType.String).WithRequired(true).WithAutocomplete(true));
 
-    private static SlashCommandBuilder WeaponValueCommand(string name, string description, ApplicationCommandOptionType type, string valueDescription) =>
-        WeaponTeamBase(name, description).AddOption(new SlashCommandOptionBuilder().WithName("value").WithDescription(valueDescription).WithType(type).WithRequired(true));
+    private SlashCommandBuilder WeaponValueCommand(string name, string description, ApplicationCommandOptionType type, string valueDescription) =>
+        WeaponTeamBase(name, description).AddOption(new SlashCommandOptionBuilder().WithName("value").WithDescription(DiscordText.Short(valueDescription, 100)).WithType(type).WithRequired(true));
 
-    private static SlashCommandOptionBuilder TeamOption(bool both = true)
+    private SlashCommandOptionBuilder TeamOption(bool both = true)
     {
-        var option = new SlashCommandOptionBuilder().WithName("team").WithDescription("Team")
+        var option = new SlashCommandOptionBuilder().WithName("team").WithDescription(Description("discord.team"))
             .WithType(ApplicationCommandOptionType.String).WithRequired(true);
-        if (both) option.AddChoice("Both", "both");
-        return option.AddChoice("Terrorist", "t").AddChoice("Counter-Terrorist", "ct");
+        if (both) option.AddChoice(DiscordText.Short(T("discord.team_both"), 100), "both");
+        return option.AddChoice(DiscordText.Short(T("discord.team_t"), 100), "t").AddChoice(DiscordText.Short(T("discord.team_ct"), 100), "ct");
     }
 
-	private static string Safe(string text) => text.Length <= 500 ? text : text[..500];
+	private static string Safe(string text) => DiscordText.Short(text, 500);
 }

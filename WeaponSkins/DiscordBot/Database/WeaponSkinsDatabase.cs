@@ -12,6 +12,8 @@ public sealed class WeaponSkinsDatabase
 	private const int TableMissing = 1146;
 	private const int ColumnMissing = 1054;
 	private readonly global::WeaponSkins.Database database;
+    private readonly Func<string, object[], string>? translate;
+    private string T(string key, params object[] args) => translate?.Invoke(key, args) ?? DiscordEnglish.Text(key, args);
 
 	private readonly CancellationToken cancellationToken;
     private readonly Action<ulong>? loadoutChanged;
@@ -20,13 +22,14 @@ public sealed class WeaponSkinsDatabase
 
 	public WeaponSkinsDatabase(global::WeaponSkins.Database database, Action<ulong>? loadoutChanged = null,
         CancellationToken cancellationToken = default, Func<ulong, CancellationToken, Task<Permissions>>? livePermissions = null,
-        global::WeaponSkins.LoadoutStore? mutationStore = null)
+        global::WeaponSkins.LoadoutStore? mutationStore = null, Func<string, object[], string>? translate = null)
 	{
 		this.database = database;
         this.loadoutChanged = loadoutChanged;
         this.cancellationToken = cancellationToken;
         this.livePermissions = livePermissions;
         this.mutationStore = mutationStore;
+        this.translate = translate;
 	}
 
     private async Task MutateAsync(ulong steamId, Func<Task> operation)
@@ -49,32 +52,32 @@ public sealed class WeaponSkinsDatabase
         return result;
     }
 
-    private static void RequireFinite(float value, string name)
+    private void RequireFinite(float value, string name)
     {
         if (!float.IsFinite(value))
-            throw new InvalidOperationException($"{name} must be a finite number.");
+            throw new InvalidOperationException(T("discord.finite_required", name));
     }
 
-    private static void ValidatePaint(PaintDef? paint)
+    private void ValidatePaint(PaintDef? paint)
     {
         if (paint == null) return;
-        RequireFinite(paint.MinFloat, "Minimum wear");
-        RequireFinite(paint.MaxFloat, "Maximum wear");
+        RequireFinite(paint.MinFloat, T("discord.minimum_wear"));
+        RequireFinite(paint.MaxFloat, T("discord.maximum_wear"));
         if (paint.MinFloat < 0f || paint.MaxFloat > 1f || paint.MinFloat > paint.MaxFloat)
-            throw new InvalidOperationException("The selected finish has an invalid wear range.");
+            throw new InvalidOperationException(T("discord.invalid_wear_range"));
     }
 
-    private static void ValidateGeneratedNumbers(SharedEconPreview item)
+    private void ValidateGeneratedNumbers(SharedEconPreview item)
     {
-        RequireFinite(item.PaintWear, "Wear");
+        RequireFinite(item.PaintWear, T("menu.wear"));
         foreach (var decoration in item.Stickers.Concat(item.Keychains))
         {
-            RequireFinite(decoration.Wear, "Sticker wear");
-            RequireFinite(decoration.Scale, "Sticker scale");
-            RequireFinite(decoration.Rotation, "Sticker rotation");
-            RequireFinite(decoration.OffsetX, "Decoration X offset");
-            RequireFinite(decoration.OffsetY, "Decoration Y offset");
-            RequireFinite(decoration.OffsetZ, "Decoration Z offset");
+            RequireFinite(decoration.Wear, T("discord.sticker_wear"));
+            RequireFinite(decoration.Scale, T("discord.sticker_scale"));
+            RequireFinite(decoration.Rotation, T("discord.sticker_rotation"));
+            RequireFinite(decoration.OffsetX, T("discord.offset_x"));
+            RequireFinite(decoration.OffsetY, T("discord.offset_y"));
+            RequireFinite(decoration.OffsetZ, T("discord.offset_z"));
         }
     }
 
@@ -98,7 +101,7 @@ public sealed class WeaponSkinsDatabase
     {
         var normalized = NormalizeCode(code);
         if (normalized.Length != 8)
-            return (false, "Invalid link code.", 0);
+            return (false, T("discord.link_invalid"), 0);
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
         await using var connection = await OpenAsync();
@@ -116,7 +119,7 @@ public sealed class WeaponSkinsDatabase
                 if (value == null)
                 {
                     await transaction.RollbackAsync();
-                    return (false, "Invalid or expired link code.", 0);
+                    return (false, T("discord.link_expired"), 0);
                 }
                 steamId = Convert.ToUInt64(value);
             }
@@ -139,17 +142,17 @@ public sealed class WeaponSkinsDatabase
                 {
                     await DeleteCode(connection, transaction, steamId);
                     await transaction.CommitAsync(cancellationToken);
-                    return (true, "Your Steam account is already linked.", steamId);
+                    return (true, T("discord.already_linked"), steamId);
                 }
                 if (link.DiscordId == discordId)
                 {
                     await transaction.RollbackAsync();
-                    return (false, "Your Discord account is already linked to another Steam account.", 0);
+                    return (false, T("discord.discord_already_linked"), 0);
                 }
                 if (link.SteamId == steamId)
                 {
                     await transaction.RollbackAsync();
-                    return (false, "That Steam account is already linked to another Discord account.", 0);
+                    return (false, T("discord.steam_already_linked"), 0);
                 }
             }
 
@@ -164,7 +167,7 @@ public sealed class WeaponSkinsDatabase
 
             await DeleteCode(connection, transaction, steamId);
             await transaction.CommitAsync(cancellationToken);
-            return (true, "Steam account linked successfully.", steamId);
+            return (true, T("discord.link_success"), steamId);
         }
         catch
         {
@@ -280,7 +283,7 @@ public sealed class WeaponSkinsDatabase
         string? nameTag)
     {
         ValidatePaint(paint);
-        if (wear.HasValue) RequireFinite(wear.Value, "Wear");
+        if (wear.HasValue) RequireFinite(wear.Value, T("menu.wear"));
         var paintId = paint?.Paint ?? 0;
         var floor = kind == ItemKind.Knife ? 0.01f : 0.000001f;
         if (paint != null)
@@ -531,7 +534,7 @@ public sealed class WeaponSkinsDatabase
 
     private async Task<bool> SetWearCoreAsync(ulong steamId, TeamTarget target, int defIndex, float wear, CatalogService catalog)
     {
-        RequireFinite(wear, "Wear");
+        RequireFinite(wear, T("menu.wear"));
         return await UpdateActiveWeapons(steamId, target, defIndex, async (connection, transaction, team, paint) =>
         {
             var def = catalog.FindPaint(defIndex, paint);
@@ -748,7 +751,7 @@ public sealed class WeaponSkinsDatabase
         var isGlove = catalog.Gloves.Any(value => value.DefIndex == item.DefIndex);
         var isWeapon = catalog.Paints.ContainsKey(item.DefIndex);
         if (!isKnife && !isGlove && !isWeapon)
-            throw new InvalidOperationException("Unknown item in inspect code.");
+            throw new InvalidOperationException(T("discord.unknown_inspect_item"));
 
         var paintDef = catalog.FindPaint(item.DefIndex, item.PaintIndex);
         ValidatePaint(paintDef);

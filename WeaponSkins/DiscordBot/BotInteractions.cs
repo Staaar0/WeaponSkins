@@ -23,7 +23,7 @@ public sealed partial class BotApp
     {
         if (interaction.GuildId == null || !IsActiveGuild(interaction.GuildId.Value))
         {
-            await interaction.RespondAsync("Use this command in the Discord server assigned to WeaponSkins.", ephemeral: true);
+            await interaction.RespondAsync(T("discord.wrong_server"), ephemeral: true);
             return;
         }
         try { await action(); }
@@ -32,11 +32,11 @@ public sealed partial class BotApp
         {
             if (cancellationToken.IsCancellationRequested) return;
             logger.LogError(ex, "WeaponSkinsBOT interaction failed");
-            var message = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : "Unable to complete this request. Please try again.";
+            var message = ex is InvalidOperationException or ArgumentException ? Safe(ex.Message) : T("discord.request_failed");
             if (interaction.HasResponded) await interaction.FollowupAsync(message, ephemeral: true, allowedMentions: AllowedMentions.None);
             else await interaction.RespondAsync(message, ephemeral: true, allowedMentions: AllowedMentions.None);
         }
-    }, () => interaction.RespondAsync("WeaponSkins is busy. Please try again in a moment.", ephemeral: true));
+    }, () => interaction.RespondAsync(T("discord.busy"), ephemeral: true));
 
     private OwnedWeaponCache ownedWeapons = null!;
     private static string SearchKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());

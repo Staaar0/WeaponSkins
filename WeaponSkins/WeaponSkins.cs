@@ -16,10 +16,11 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.8";
+	public override string ModuleVersion => "1.1.9";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();
+	private PluginTranslations? translations;
 	public CatalogService Catalog { get; private set; } = null!;
 	public Database Db { get; private set; } = null!;
 	public LoadoutStore Store { get; private set; } = null!;
@@ -85,6 +86,10 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 	{
 		config.Version = Math.Max(config.Version, 6);
 		config.Menu ??= new MenuConfig();
+		config.Api ??= new ApiConfig();
+		config.Api.Language = PluginTranslations.NormalizeLanguage(config.Api.Language);
+		if (ConfigMigration.IsOriginalApi(config.Api.BaseUrl))
+			config.Api.BaseUrl = ApiConfig.DefaultBaseUrl;
 		if (config.LinkingMethod == "2" || string.Equals(config.LinkingMethod, "Discord-Utilities", StringComparison.OrdinalIgnoreCase))
 			config.LinkingMethod = "Discord-Utilities";
 		else if (config.LinkingMethod == "1" || string.Equals(config.LinkingMethod, "WeaponSkinsBOT", StringComparison.OrdinalIgnoreCase))
@@ -96,6 +101,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		}
 
 		Config = config;
+		translations = new PluginTranslations(ModuleDirectory, config.Api.Language, Logger);
 		UpdateConfigFile();
 	}
 
@@ -108,7 +114,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 			if (!File.Exists(path) || !string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase))
 				return;
 
-			// Change only the new option, version and missing notes.
+			// Update known defaults and keep the server's other settings.
 			var originalBytes = File.ReadAllBytes(path);
 			using var reader = new StreamReader(new MemoryStream(originalBytes), Encoding.UTF8, true);
 			var original = reader.ReadToEnd();
@@ -168,7 +174,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 		Applier = new WeaponApplier(this, Cache, Catalog);
 		GloveApply = new GloveService(this, Cache);
 		Profile = new ProfileService(this, Cache);
-		Menu = new MenuRenderer(Config.Menu, Localizer);
+		Menu = new MenuRenderer(Config.Menu, Localizer, key => Text(key));
 		Menus = new SkinMenus(this);
 		LinkStore = new LinkStore(Db);
 		Links = new LinkService(this, LinkStore);
@@ -692,6 +698,8 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
 
 	public string Text(string key, params object[] args)
 	{
+		if (translations != null)
+			return translations.Text(key, args);
 		var value = Localizer[key].Value;
 		for (var i = 0; i < args.Length; i++)
 			value = value.Replace("{" + i + "}", args[i]?.ToString() ?? "");

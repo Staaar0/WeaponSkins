@@ -13,21 +13,21 @@ public sealed partial class PickerService
         ("Factory New", "0.02"), ("Minimal Wear", "0.08"), ("Field-Tested", "0.16"),
         ("Well-Worn", "0.38"), ("Battle-Scarred", "0.45")
     ];
-    private static string CanonicalCategory(string value) => value.Trim().ToLowerInvariant() switch
+    private string CanonicalCategory(string value) => Categories.FirstOrDefault(category => string.Equals(CategoryLabel(category), value.Trim(), StringComparison.OrdinalIgnoreCase)) ?? value.Trim().ToLowerInvariant() switch
     {
         "snipers" or "rifles" => "Rifles", "pistols" or "other" or "equipment" => "Pistols",
         "smg" or "smgs" => "SMG", "knifes" or "knife" or "knives" => "Knifes",
         "gloves" => "Gloves", "heavy" => "Heavy", _ => value.Trim()
     };
-    private static string Short(string text, int max = 100) => text.Length <= max ? text : text[..(max - 1)] + "…";
+    private static string Short(string text, int max = 100) => DiscordText.Short(text, max);
     private static string Inline(string text) => text.Replace('`', 'ˋ');
-    private static string TeamLabel(TeamTarget team) => team switch {
-        TeamTarget.Terrorist => "Terrorist", TeamTarget.CounterTerrorist => "Counter-Terrorist", _ => "Both"
+    private string TeamLabel(TeamTarget team) => team switch {
+        TeamTarget.Terrorist => T("discord.team_t"), TeamTarget.CounterTerrorist => T("discord.team_ct"), _ => T("discord.team_both")
     };
-    private static string WearName(float wear) => wear switch {
-        < .07f => "Factory New", < .15f => "Minimal Wear", < .38f => "Field-Tested", < .45f => "Well-Worn", _ => "Battle-Scarred"
-    };
-    private static string StatTrakText(Session s) => s.StatTrak ? "ON :green_circle:" : "OFF :red_circle:";
+    private string WearName(float wear) => T(wear switch {
+        < .07f => "menu.wear_fn", < .15f => "menu.wear_mw", < .38f => "menu.wear_ft", < .45f => "menu.wear_ww", _ => "menu.wear_bs"
+    });
+    private string StatTrakText(Session s) => s.StatTrak ? T("menu.on") + " :green_circle:" : T("menu.off") + " :red_circle:";
     private string PaintName(Session s) => string.IsNullOrEmpty(s.Paint?.DisplayName)
         ? catalog.WeaponName(s.DefIndex) + " | " + s.Paint?.Name : s.Paint.DisplayName;
     private static float EffectiveWear(Session s, float value)
@@ -37,7 +37,20 @@ public sealed partial class PickerService
         return Math.Clamp(value, floor, s.Paint?.MaxFloat ?? 1);
     }
     private static bool Searchable(Session s) => s.Stage is Stage.Agents or Stage.Music or Stage.Pins or Stage.Stickers;
-    private static string StageName(Session s) => s.Stage.ToString().ToLowerInvariant();
+    private string CategoryLabel(string category) => category switch
+    {
+        "Knifes" => T("menu.knife"), "Gloves" => T("menu.gloves"),
+        "Rifles" => T("category.rifles"), "Pistols" => T("category.pistols"),
+        "SMG" => T("category.smgs"), "Heavy" => T("category.heavy"), _ => category
+    };
+    private string StageLabel(Session s) => s.Stage switch
+    {
+        Stage.Categories => T("discord.categories"), Stage.Weapons => T("discord.weapons"),
+        Stage.Paints or Stage.Preview => T("menu.skins"), Stage.Agents => T("menu.agents"),
+        Stage.Music => T("menu.music"), Stage.Pins => T("menu.pins"),
+        Stage.Slots => T("discord.sticker_slots"), Stage.Stickers => T("menu.stickers"),
+        Stage.Unlink => T("discord.unlink"), _ => "WeaponSkins"
+    };
     private static string Id(Session s, string action) => $"pick:{s.Id}:{s.Revision}:{action}";
     private static Emoji? RarityEmoji(string color) => color.ToLowerInvariant() switch {
         "#b0c3d9" => new Emoji("⚪"), "#5e98d9" or "#4b69ff" => new Emoji("🔵"),
@@ -56,7 +69,7 @@ public sealed partial class PickerService
         return builder.Build();
     }
     private static void Button(ComponentBuilder builder, Session s, string action, string label, ButtonStyle style = ButtonStyle.Primary, string? emoji = null, bool disabled = false) =>
-        builder.WithButton(label, Id(s, action), style, emote: emoji == null ? null : Emoji.Parse(emoji), disabled: disabled, row: 0);
+        builder.WithButton(Short(label, 80), Id(s, action), style, emote: emoji == null ? null : Emoji.Parse(emoji), disabled: disabled, row: 0);
 
     private readonly ConcurrentDictionary<string, List<Choice>> catalogueChoices = new();
 
@@ -79,7 +92,7 @@ public sealed partial class PickerService
     private List<Choice> BuildChoices(Session s)
     {
         IEnumerable<Choice> items = s.Stage switch {
-            Stage.Categories => catalog.MenuCategories.Where(Categories.Contains).Select(x => new Choice(x, x)),
+            Stage.Categories => catalog.MenuCategories.Where(Categories.Contains).Select(x => new Choice(x, CategoryLabel(x))),
             Stage.Weapons when s.Category == "Knifes" => catalog.Knives.OrderBy(x => catalog.MenuWeaponOrder.GetValueOrDefault(x.DefIndex)).Select(x => new Choice(x.DefIndex.ToString(), "★ " + x.Name)),
             Stage.Weapons when s.Category == "Gloves" => catalog.Gloves.OrderBy(x => catalog.MenuWeaponOrder.GetValueOrDefault(x.DefIndex)).Select(x => new Choice(x.DefIndex.ToString(), "★ " + x.Name)),
             Stage.Weapons => catalog.WeaponsByCategory.Where(x => CanonicalCategory(x.Key) == s.Category).SelectMany(x => x.Value)
@@ -92,7 +105,7 @@ public sealed partial class PickerService
                 .Select((x, i) => new Choice("agent_" + i, string.IsNullOrEmpty(x.DisplayName) ? x.Name : x.DisplayName, x.Image, x.RarityColor)),
             Stage.Music => catalog.MusicKits.Select(x => new Choice(x.Id.ToString(), x.Name, x.Image)),
             Stage.Pins => catalog.Pins.Select(x => new Choice(x.Id.ToString(), x.Name, x.Image)),
-            Stage.Slots => Enumerable.Range(1, StickerSlots).Select(x => new Choice(x.ToString(), "Slot " + x)).Append(new Choice("all", "All four slots")),
+            Stage.Slots => Enumerable.Range(1, StickerSlots).Select(x => new Choice(x.ToString(), T("menu.sticker_slot", x))).Append(new Choice("all", T("menu.set_all"))),
             Stage.Stickers => catalog.Stickers.Select(x => new Choice(x.Id.ToString(), x.Name, x.Image)),
             _ => []
         };
@@ -104,23 +117,22 @@ public sealed partial class PickerService
         var components = new ComponentBuilder();
         if (s.Stage == Stage.Unlink)
         {
-            Button(components, s, "unlink", "Unlink", ButtonStyle.Danger);
-            Button(components, s, "cancel", "Cancel", ButtonStyle.Secondary);
-            return new(Embed("Unlink Steam account", $"> Unlink SteamID {s.SteamId} from WeaponSkins?"), components.Build());
+            Button(components, s, "unlink", T("discord.unlink"), ButtonStyle.Danger);
+            Button(components, s, "cancel", T("discord.cancel"), ButtonStyle.Secondary);
+            return new(Embed(T("discord.unlink_title"), T("discord.unlink_confirm", s.SteamId)), components.Build());
         }
         if (s.Stage == Stage.Preview)
         {
-            Button(components, s, "back", "Back", ButtonStyle.Danger, ":back:");
-            Button(components, s, "seed", "Seed / Pattern", emoji: ":pencil:");
-            Button(components, s, "tag", "Nametag", emoji: ":card_index:", disabled: s.Kind == ItemKind.Glove);
-            Button(components, s, "st", "Stattrak", emoji: ":bar_chart:", disabled: s.Kind == ItemKind.Glove);
-            Button(components, s, "save", "Save", ButtonStyle.Success, ":pushpin:");
-            var wearMenu = new SelectMenuBuilder().WithCustomId(Id(s, "wear")).WithPlaceholder("Select a skin wear");
-            foreach (var option in WearOptions) wearMenu.AddOption(option.Label, option.Value);
-            wearMenu.AddOption("Custom Float", "custom");
+            Button(components, s, "back", T("discord.back"), ButtonStyle.Danger, ":back:");
+            Button(components, s, "seed", T("discord.seed_pattern"), emoji: ":pencil:");
+            Button(components, s, "tag", T("menu.nametag"), emoji: ":card_index:", disabled: s.Kind == ItemKind.Glove);
+            Button(components, s, "st", T("menu.stattrak"), emoji: ":bar_chart:", disabled: s.Kind == ItemKind.Glove);
+            Button(components, s, "save", T("discord.save"), ButtonStyle.Success, ":pushpin:");
+            var wearMenu = new SelectMenuBuilder().WithCustomId(Id(s, "wear")).WithPlaceholder(Short(T("discord.wear_placeholder")));
+            foreach (var option in WearOptions) wearMenu.AddOption(Short(WearName(float.Parse(option.Value, CultureInfo.InvariantCulture))), option.Value);
+            wearMenu.AddOption(Short(T("discord.custom_float")), "custom");
             components.WithSelectMenu(wearMenu, row: 1);
-            var text = $"> Wear: `{WearName(s.Wear)}` ({s.Wear.ToString("0.######", CultureInfo.InvariantCulture)})\n" +
-                $"> Seed / Pattern: `{s.Seed}`\n> Rarity: `{s.Paint?.Rarity}`\n> Stattrak: {StatTrakText(s)}\n> Nametag: `{Inline(s.NameTag.Length == 0 ? "Not Set" : s.NameTag)}`";
+            var text = T("discord.preview_details", WearName(s.Wear), s.Wear.ToString("0.######", CultureInfo.InvariantCulture), s.Seed, s.Paint?.Rarity ?? "", StatTrakText(s), Inline(s.NameTag.Length == 0 ? T("discord.not_set") : s.NameTag));
             return new(Embed(PaintName(s), text, s.Paint?.RarityColor ?? "#ffffff", s.Paint?.Image ?? ""), components.Build());
         }
         var choices = Choices(s);
@@ -128,62 +140,62 @@ public sealed partial class PickerService
         s.Page = Math.Clamp(s.Page, 0, pages - 1);
         if (s.Stage == Stage.Paints)
         {
-            Button(components, s, "back", "Back", ButtonStyle.Danger, ":back:");
-            Button(components, s, "default", "Default", ButtonStyle.Secondary);
+            Button(components, s, "back", T("discord.back"), ButtonStyle.Danger, ":back:");
+            Button(components, s, "default", T("menu.default"), ButtonStyle.Secondary);
         }
         else if (s.Stage == Stage.Weapons)
         {
-            if (s.Category is "Knifes" or "Gloves") Button(components, s, "default", "Default " + s.Category, ButtonStyle.Secondary);
+            if (s.Category is "Knifes" or "Gloves") Button(components, s, "default", T("menu.default") + " " + CategoryLabel(s.Category), ButtonStyle.Secondary);
         }
         else
         {
             if (Searchable(s))
             {
-                Button(components, s, "search", "Search");
-                Button(components, s, "default", s.Stage == Stage.Stickers ? "Remove from selected slots" : "Default", ButtonStyle.Secondary);
-                if (s.Stage == Stage.Stickers) Button(components, s, "clear", "Remove all stickers and charm", ButtonStyle.Danger);
+                Button(components, s, "search", T("discord.search"));
+                Button(components, s, "default", s.Stage == Stage.Stickers ? T("discord.remove_selected") : T("menu.default"), ButtonStyle.Secondary);
+                if (s.Stage == Stage.Stickers) Button(components, s, "clear", T("discord.remove_decorations"), ButtonStyle.Danger);
             }
-            Button(components, s, "cancel", "Back", ButtonStyle.Danger, ":back:");
+            Button(components, s, "cancel", T("discord.back"), ButtonStyle.Danger, ":back:");
         }
         if (choices.Count > 0)
         {
             var placeholder = s.Stage switch {
-                Stage.Weapons => "Select a weapon (" + s.Category + ")", Stage.Paints => "Select a skin",
-                Stage.Agents => "Select a agent", _ => "Select " + StageName(s)
+                Stage.Weapons => T("discord.weapon_placeholder", CategoryLabel(s.Category)), Stage.Paints => T("discord.skin_placeholder"),
+                Stage.Agents => T("discord.agent_placeholder"), _ => T("discord.select_stage", StageLabel(s))
             };
             var menu = new SelectMenuBuilder().WithCustomId(Id(s, "select")).WithPlaceholder(Short(placeholder));
-            if (s.Stage == Stage.Paints && s.Page < pages - 1) menu.AddOption("Next Page", "__next", emote: Emoji.Parse(":arrow_right:"));
-            if (s.Page > 0) menu.AddOption("Previous Page", "__prev", emote: Emoji.Parse(":arrow_left:"));
+            if (s.Stage == Stage.Paints && s.Page < pages - 1) menu.AddOption(Short(T("discord.next_page")), "__next", emote: Emoji.Parse(":arrow_right:"));
+            if (s.Page > 0) menu.AddOption(Short(T("discord.previous_page")), "__prev", emote: Emoji.Parse(":arrow_left:"));
             foreach (var choice in choices.Skip(s.Page * PageSize).Take(PageSize))
-                menu.AddOption(Short(choice.Label), choice.Value, "Click to select", RarityEmoji(choice.Rarity));
-            if (s.Stage != Stage.Paints && s.Page < pages - 1) menu.AddOption("Next Page", "__next", emote: Emoji.Parse(":arrow_right:"));
+                menu.AddOption(Short(choice.Label), choice.Value, Short(T("discord.click_select")), RarityEmoji(choice.Rarity));
+            if (s.Stage != Stage.Paints && s.Page < pages - 1) menu.AddOption(Short(T("discord.next_page")), "__next", emote: Emoji.Parse(":arrow_right:"));
             // Show buttons above the menu, like Discord Utilities.
             var hasButtons = s.Stage != Stage.Weapons || s.Category is "Knifes" or "Gloves";
             components.WithSelectMenu(menu, row: hasButtons ? 1 : 0);
         }
         if (s.Stage == Stage.Weapons && choices.Count > 0) return new(null, components.Build());
         if (s.Stage == Stage.Paints)
-            return new(Embed((s.Kind is ItemKind.Knife or ItemKind.Glove ? "★ " : "") + catalog.WeaponName(s.DefIndex), "> Please choose a skin", image: s.Kind == ItemKind.Glove ? "" : catalog.WeaponImages.GetValueOrDefault(s.DefIndex, "")), components.Build());
+            return new(Embed((s.Kind is ItemKind.Knife or ItemKind.Glove ? "★ " : "") + catalog.WeaponName(s.DefIndex), T("discord.choose_skin_prompt"), image: s.Kind == ItemKind.Glove ? "" : catalog.WeaponImages.GetValueOrDefault(s.DefIndex, "")), components.Build());
         var title = s.Stage switch {
-            Stage.Agents => "Agents — " + (s.Team == TeamTarget.CounterTerrorist ? "CT" : "T"),
-            Stage.Stickers => catalog.WeaponName(s.DefIndex) + " — stickers", _ => s.Stage.ToString()
+            Stage.Agents => T("menu.agents") + " — " + (s.Team == TeamTarget.CounterTerrorist ? "CT" : "T"),
+            Stage.Stickers => catalog.WeaponName(s.DefIndex) + " — " + T("menu.stickers"), _ => StageLabel(s)
         };
-        var description = (choices.Count == 0 ? "No matches. Use Search to change the filter." : "Click to select") + $"\n> Page {s.Page + 1}/{pages}";
+        var description = (choices.Count == 0 ? T("discord.no_matches") : T("discord.click_select")) + "\n> " + T("discord.page", s.Page + 1, pages);
         return new(Embed(title, "> " + description), components.Build());
     }
 
-    private static Modal BuildModal(Session s, string action)
+    private Modal BuildModal(Session s, string action)
     {
         if (action == "search" && !Searchable(s) || action != "search" && s.Stage != Stage.Preview)
-            throw new InvalidOperationException("This control is no longer available.");
+            throw new InvalidOperationException(T("discord.control_unavailable"));
         var (title, label, placeholder, value, max, required) = action switch {
-            "search" => ("Search " + StageName(s), "Name or item ID", "", s.Filter, 100, false),
-            "seed" => ("Change a seed / pattern", "Seed / Pattern", "Min. 0 and Max. 1000", s.Seed.ToString(), 4, true),
-            "tag" => ("Change a nametag", "Nametag", "Leave empty to remove", s.NameTag, 64, false),
-            _ => ("Change a skin wear", "Float", "Min. 0 and Max. 1 (skin limits apply)", s.Wear.ToString("0.######", CultureInfo.InvariantCulture), 16, true)
+            "search" => (T("discord.search_title", StageLabel(s)), T("discord.name_or_id"), "", s.Filter, 100, false),
+            "seed" => (T("discord.seed_title"), T("discord.seed_pattern"), T("discord.seed_range"), s.Seed.ToString(), 4, true),
+            "tag" => (T("discord.nametag_title"), T("menu.nametag"), T("discord.empty_remove"), s.NameTag, 64, false),
+            _ => (T("discord.wear_title"), T("discord.float"), T("discord.wear_range"), s.Wear.ToString("0.######", CultureInfo.InvariantCulture), 16, true)
         };
-        return new ModalBuilder().WithTitle(title).WithCustomId(Id(s, action))
-            .AddTextInput(label, "value", placeholder: placeholder.Length == 0 ? null : placeholder,
+        return new ModalBuilder().WithTitle(Short(title, 45)).WithCustomId(Id(s, action))
+            .AddTextInput(Short(label, 45), "value", placeholder: placeholder.Length == 0 ? null : Short(placeholder),
                 value: value.Length == 0 ? null : value, maxLength: max, required: required).Build();
     }
 }

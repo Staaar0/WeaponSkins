@@ -1071,12 +1071,18 @@ public sealed class SkinMenus
 				sticker,
 				source,
 				GetStickerGroup(sticker, source),
-				GetStickerType(sticker.Name),
+				GetStickerType(sticker),
 				IsPlayerSticker(sticker));
 
 			if (!bySource.TryGetValue(source, out var entries))
 				bySource[source] = entries = [];
 			entries.Add(entry);
+			if (entry.Group.Length > 0)
+			{
+				var label = source == "Major Stickers" ? sticker.TournamentEvent : sticker.Capsule;
+				if (label.Length > 0)
+					browser.GroupLabels.TryAdd(TypeKey(source, entry.Group), label);
+			}
 		}
 
 		foreach (var source in StickerSources)
@@ -1194,7 +1200,7 @@ public sealed class SkinMenus
 		foreach (var group in groups)
 		{
 			var value = group;
-			items.Add(new MenuItem(group, (p, s) => Renderer.Open(p, (pp, ss) => StickerTypeMenu(pp, ss, source, value))));
+			items.Add(new MenuItem(StickerGroupLabel(source, group), (p, s) => Renderer.Open(p, (pp, ss) => StickerTypeMenu(pp, ss, source, value))));
 		}
 
 		return new Menu { Title = plugin.Text("menu.sticker_event", StickerSourceLabel(source)), Items = items };
@@ -1211,7 +1217,7 @@ public sealed class SkinMenus
 		foreach (var type in types)
 		{
 			var value = type;
-			items.Add(new MenuItem(type, (p, s) =>
+			items.Add(new MenuItem(StickerTypeLabel(type), (p, s) =>
 			{
 				if (SplitStickerAudience(source, group, value))
 					Renderer.Open(p, (pp, ss) => StickerAudienceMenu(pp, ss, source, group, value));
@@ -1220,7 +1226,7 @@ public sealed class SkinMenus
 			}));
 		}
 
-		var title = group.Length > 0 ? group : StickerSourceLabel(source);
+		var title = group.Length > 0 ? StickerGroupLabel(source, group) : StickerSourceLabel(source);
 		return new Menu { Title = plugin.Text("menu.sticker_type", title), Items = items };
 	}
 
@@ -1232,7 +1238,7 @@ public sealed class SkinMenus
 			new(plugin.Text("menu.sticker_players"), (p, s) => Renderer.Open(p, (pp, ss) => StickerSelectionList(pp, ss, source, group, type, "Players")))
 		};
 
-		return new Menu { Title = plugin.Text("menu.sticker_audience", type), Items = items };
+		return new Menu { Title = plugin.Text("menu.sticker_audience", StickerTypeLabel(type)), Items = items };
 	}
 
 	private Menu StickerSelectionList(CCSPlayerController player, MenuSession session, string source, string group, string type, string audience)
@@ -1417,6 +1423,8 @@ public sealed class SkinMenus
 
 	private static string GetStickerEvent(StickerDef sticker)
 	{
+		if (sticker.TournamentKey.Length > 0)
+			return sticker.TournamentKey;
 		if (sticker.TournamentEvent.Length > 0)
 			return sticker.TournamentEvent;
 
@@ -1431,6 +1439,14 @@ public sealed class SkinMenus
 
 	private static string GetStickerOperationGroup(StickerDef sticker)
 	{
+		if (sticker.CrateId == "crate-4600" || sticker.SourceKey.Contains("/shattered_web/", StringComparison.Ordinal))
+			return "Shattered Web";
+		if (sticker.CrateId == "crate-4729" || sticker.SourceKey.Contains("/broken_fang/", StringComparison.Ordinal))
+			return "Broken Fang";
+		if (sticker.CrateId is "crate-4779" or "crate-4783" ||
+			sticker.SourceKey.Contains("/op_riptide/", StringComparison.Ordinal) ||
+			sticker.SourceKey.Contains("/riptide_surfshop/", StringComparison.Ordinal))
+			return "Riptide";
 		foreach (var operation in OperationStickerEvents)
 		{
 			if (sticker.Capsule.Contains(operation, StringComparison.OrdinalIgnoreCase) ||
@@ -1451,7 +1467,7 @@ public sealed class SkinMenus
 
 	private static string GetStickerCapsuleGroup(StickerDef sticker)
 	{
-		var capsule = sticker.Capsule;
+		var capsule = CatalogNames.StickerCanonicalCapsule(sticker.CrateId, sticker.Capsule);
 		if (capsule.Contains("Warhammer", StringComparison.OrdinalIgnoreCase)) return "Warhammer";
 		if (string.Equals(capsule, "Sticker Capsule 2", StringComparison.OrdinalIgnoreCase)) return "Sticker Capsule 2";
 		if (string.Equals(capsule, "Sticker Capsule", StringComparison.OrdinalIgnoreCase)) return "Sticker Capsule";
@@ -1498,8 +1514,11 @@ public sealed class SkinMenus
 		return "";
 	}
 
-	private static string GetStickerType(string name)
+	private static string GetStickerType(StickerDef sticker)
 	{
+		if (sticker.Effect is "Normal" or "Holo" or "Foil" or "Gold" or "Glitter" or "Embroidered" or "Lenticular")
+			return sticker.Effect;
+		var name = sticker.Name;
 		if (name.Contains("(Holo", StringComparison.OrdinalIgnoreCase)) return "Holo";
 		if (name.Contains("(Foil", StringComparison.OrdinalIgnoreCase)) return "Foil";
 		if (name.Contains("(Gold", StringComparison.OrdinalIgnoreCase)) return "Gold";
@@ -1569,9 +1588,35 @@ public sealed class SkinMenus
 		return text == key ? source : text;
 	}
 
-	private static string StickerSlotTitle(int slot)
+	private string StickerTypeLabel(string type)
 	{
-		return slot < 0 ? "All Slots" : (slot + 1).ToString(CultureInfo.InvariantCulture);
+		var key = "menu.sticker_type_" + type.ToLowerInvariant();
+		var label = plugin.Text(key);
+		return label == key ? type : label;
+	}
+
+	private string StickerGroupLabel(string source, string group)
+	{
+		if (!plugin.Config.Api.Language.Equals("en", StringComparison.OrdinalIgnoreCase) &&
+			Browser()?.GroupLabels.TryGetValue(TypeKey(source, group), out var translated) == true)
+			return translated;
+		if (group is "Community 1" or "Community 2018")
+			return plugin.Text("menu.sticker_group_community", group[10..]);
+		var key = group switch
+		{
+			"Sticker Capsule" => "menu.sticker_group_capsule",
+			"Sticker Capsule 2" => "menu.sticker_group_capsule2",
+			"2021 Community" => "menu.sticker_group_community2021",
+			"Skill Groups" => "menu.sticker_group_skill_groups",
+			"Team Roles" => "menu.sticker_group_team_roles",
+			_ => ""
+		};
+		return key.Length == 0 ? group : plugin.Text(key);
+	}
+
+	private string StickerSlotTitle(int slot)
+	{
+		return slot < 0 ? plugin.Text("menu.set_all") : (slot + 1).ToString(CultureInfo.InvariantCulture);
 	}
 
 	private sealed record StickerMenuEntry(StickerDef Sticker, string Source, string Group, string Type, bool IsPlayer);
@@ -1580,6 +1625,7 @@ public sealed class SkinMenus
 	{
 		public readonly List<string> Sources = [];
 		public readonly Dictionary<string, List<string>> Groups = [];
+		public readonly Dictionary<string, string> GroupLabels = [];
 		public readonly Dictionary<string, List<string>> Types = [];
 		public readonly Dictionary<string, List<MenuItem>> Lists = [];
 	}

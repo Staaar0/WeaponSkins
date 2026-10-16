@@ -7,6 +7,14 @@ public static class ConfigMigration
 {
 	private const string MenuNote = "1=Built-in 2=NickFox-MenuManager 3=RRimmer-PanoramaMenu";
 
+	public static bool IsOriginalApi(string? url)
+	{
+		return url?.TrimEnd('/') is string value && (
+			value.Equals("https://cdn.jsdelivr.net/gh/ByMykel/CSGO-API@main/public/api", StringComparison.OrdinalIgnoreCase) ||
+			value.Equals("https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api", StringComparison.OrdinalIgnoreCase) ||
+			value.Equals("https://raw.githubusercontent.com/ByMykel/CSGO-API/refs/heads/main/public/api", StringComparison.OrdinalIgnoreCase));
+	}
+
 	public static string UpdateJson(string text)
 	{
 		var root = Parse(text);
@@ -20,6 +28,18 @@ public static class ConfigMigration
 				throw new JsonException("ConfigVersion must be a whole number.");
 			if (number < 6)
 				text = Replace(text, version.Value.Start, version.Value.End, "6");
+		}
+
+		root = Parse(text);
+		var api = Find(root, "api");
+		if (api?.Value.Kind == JsonTokenType.StartObject)
+		{
+			var baseUrl = Find(api.Value, "base_url");
+			if (baseUrl == null)
+				text = InsertFirst(text, api.Value, "\"base_url\": " + JsonSerializer.Serialize(ApiConfig.DefaultBaseUrl));
+			else if (baseUrl.Value.Kind == JsonTokenType.String &&
+				IsOriginalApi(JsonSerializer.Deserialize<string>(text[baseUrl.Value.Start..baseUrl.Value.End])))
+				text = Replace(text, baseUrl.Value.Start, baseUrl.Value.End, JsonSerializer.Serialize(ApiConfig.DefaultBaseUrl));
 		}
 
 		root = Parse(text);
