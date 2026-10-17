@@ -3,6 +3,7 @@ name: WeaponSkins
 on:
   push:
     branches: [main, master]
+    paths-ignore: [README.md]
   pull_request:
   workflow_dispatch:
 
