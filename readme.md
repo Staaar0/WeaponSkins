@@ -147,7 +147,7 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
 
 ## PMM_WeaponSkins
 
-- For those who use [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) and want custom panorama UI
+- For those who use [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) and want custom panorama UI.
 - Check [PMM_WeaponSkins](https://github.com/Staaar0/PMM_WeaponSkins)
 
 ## Default Config
