@@ -138,8 +138,17 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
 <img src="docs/PanoramaMenu.png" width="100%" alt="RRimmer-PanoramaMenu Showcase"><br>
 <strong>RRimmer-PanoramaMenu Showcase</strong>
 </td>
+<td width="50%" align="center">
+<img src="docs/WeaponSkins.png" width="100%" alt="PMM_WeaponSkins Showcase"><br>
+<strong>PMM_WeaponSkins Showcase</strong>
+</td>
 </tr>
 </table>
+
+## PMM_WeaponSkins
+
+- For those how use [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) and want custom panorama UI
+- Check [PMM_WeaponSkins](https://github.com/Staaar0/PMM_WeaponSkins)
 
 ## Default Config
 ```json
