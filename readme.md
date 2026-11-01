@@ -3,15 +3,15 @@
 A CSSharp plugin for CS2 that gives players full control over how their loadout looks.
 
 ## Features
-- Optional Built-in Discord Bot for linking and changing skins from Discord
-- Weapon skins with float, pattern, name tag and StatTrak
+- Optional Built-in Discord Bot for linking and changing skins via Discord
+- Weapon skins with float, pattern, nametag and StatTrak
 - Knife selector
 - Gloves selector
 - Agents selector
 - Music kit selector
 - Pins selector
 - Sticker menu with 4 slots per weapon (with optional **VIP-Only** option **OFF** by default) NOTE: !gen,!stickers share same VIP-Only optional setting
-- Gen codes: apply a full custom craft with one command from [cs2inspects](https://cs2inspects.com/sticker-customizer)/[csfloat](https://csfloat.com/db)/[steam](https://steamcommunity.com/market/search?appid=730)/[cs2preview](https://cs2preview.com/craft) inspect link code
+- Gen apply a full custom craft up to 5 stickers with one command from [cs2inspects](https://cs2inspects.com/sticker-customizer)/[csfloat](https://csfloat.com/db)/[steam](https://steamcommunity.com/market/search?appid=730)/[cs2preview](https://cs2preview.com/craft) inspect link code
 - Auto skins update after game update
 - Everything is saved per player and per team in MySQL
 
@@ -49,8 +49,8 @@ A CSSharp plugin for CS2 that gives players full control over how their loadout 
 - MySQL
 - Disable `FollowCS2ServerGuidelines` path: `addons/counterstrikesharp/configs/core.json`
 
-## link system Requirements
-- Use Built-in Discord bot ``"discord_bot_token": "YOUR_BOT_TOKEN"`` For link system / everything can be changed via discord
+## link system Options
+- Built-in Discord bot ``"discord_bot_token": "YOUR_BOT_TOKEN"`` For link system / everything can be changed via discord
 - [CS2-Discord-Utilities](https://github.com/NockyCZ/CS2-Discord-Utilities) For link system only / NO skins changes via discord
 
 ## in-game plugin Install
