@@ -11,13 +11,11 @@ public sealed class WeaponApplier
 
 	private const int GlockDefIndex = 4;
 
-	private const float RenderWearStep = 0.001f;
-	private const int MaxRenderWearSteps = 21;
 
 	private readonly WeaponSkins plugin;
 	private readonly PlayerCache cache;
 	private readonly CatalogService catalog;
-	private readonly Dictionary<int, Dictionary<int, RenderWear>> stickerWear = [];
+	private readonly WearKeys wearKeys = new();
 
 	private readonly Dictionary<(int Slot, int DefIndex), AppliedState> appliedStates = [];
 	private readonly HashSet<int> refreshing = [];
@@ -28,7 +26,6 @@ public sealed class WeaponApplier
 	private int mapGeneration;
 	private int nextRefreshRevision;
 
-	private readonly record struct RenderWear(float BaseWear, int Steps);
 
 	private readonly record struct AppliedState(
 		uint WeaponHandle,
@@ -138,7 +135,8 @@ public sealed class WeaponApplier
 		entry.Seed = seedValue;
 		entry.Wear = wear;
 
-		var renderWear = StoredStickerWear(player.Slot, defIndex);
+		// PMM: one texture-cache key per sticker layout, see WearKeys.
+		float? renderWear = entry.Paint > 0 ? wearKeys.Resolve(entry.Paint, seedValue, wear, StickerSignature(defIndex, entry)) : null;
 		var state = new AppliedState(
 			weapon.EntityHandle.Raw,
 			(int)player.Team,
@@ -165,10 +163,10 @@ public sealed class WeaponApplier
 		weapon.FallbackSeed = seed;
 		weapon.FallbackWear = wear;
 		weapon.FallbackStatTrak = entry.StatTrak;
-		ApplyItemAttributes(player, item, entry, isKnife, seed, wear);
+		ApplyItemAttributes(player, item, entry, isKnife, seed, renderWear ?? wear);
 
-		if (renderWear is { } bumped)
-			weapon.FallbackWear = bumped;
+		if (renderWear is { } keyed)
+			weapon.FallbackWear = keyed;
 
 		if (paint != null && !isKnife)
 			weapon.AcceptInput("SetBodygroup", value: $"body,{(paint.Legacy ? 1 : 0)}");
@@ -312,42 +310,6 @@ public sealed class WeaponApplier
 		return hash.ToHashCode();
 	}
 
-	private float? StoredStickerWear(int slot, int defIndex)
-	{
-		if (!stickerWear.TryGetValue(slot, out var byWeapon) || !byWeapon.TryGetValue(defIndex, out var stored))
-			return null;
-
-		if (!float.IsFinite(stored.BaseWear))
-		{
-			byWeapon.Remove(defIndex);
-			return null;
-		}
-
-		var offset = stored.Steps * (double)RenderWearStep;
-		var nudged = stored.BaseWear + offset;
-
-		if (nudged > 1d)
-			nudged = stored.BaseWear - offset;
-
-		return (float)Math.Clamp(nudged, 0d, 1d);
-	}
-
-	private void BumpStickerWear(int slot, int defIndex, float wear)
-	{
-		if (!float.IsFinite(wear))
-			return;
-
-		wear = Math.Clamp(wear, 0f, 1f);
-		if (!stickerWear.TryGetValue(slot, out var byWeapon))
-			stickerWear[slot] = byWeapon = [];
-
-		var steps = byWeapon.TryGetValue(defIndex, out var previous) ? previous.Steps + 1 : 1;
-		if (steps > MaxRenderWearSteps)
-			steps = 1;
-
-		byWeapon[defIndex] = new RenderWear(wear, steps);
-	}
-
 	private static void ApplyCharm(CEconItemView item, CharmEntry charm)
 	{
 		if (!CosmeticRules.IsValidCharm(charm))
@@ -392,24 +354,13 @@ public sealed class WeaponApplier
 			RefreshAll(player, slotCommand);
 	}
 
+	// PMM: the per-layout keys in WearKeys replace the old 21-step wear nudge, so these are no-ops now.
 	private void BumpRenderWear(CCSPlayerController player, int defIndex)
 	{
-		var entry = cache.Get(player)?.For(player.Team).Weapons.GetValueOrDefault(defIndex);
-		if (entry is { Paint: > 0 })
-			BumpStickerWear(player.Slot, defIndex, entry.Wear);
 	}
 
 	public void BumpAllRenderWear(CCSPlayerController player)
 	{
-		var loadout = cache.Get(player);
-		if (loadout == null)
-			return;
-
-		foreach (var (defIndex, entry) in loadout.For(player.Team).Weapons)
-		{
-			if (entry is { Paint: > 0 })
-				BumpStickerWear(player.Slot, defIndex, entry.Wear);
-		}
 	}
 
 	public void ApplyInventory(CCSPlayerController player)
@@ -894,7 +845,6 @@ public sealed class WeaponApplier
 	public void Drop(int slot)
 	{
 		ForgetAppliedStates(slot);
-		stickerWear.Remove(slot);
 		lifeRevisions.Remove(slot);
 		activeRefreshRevisions.Remove(slot);
 		refreshing.Remove(slot);
@@ -910,11 +860,58 @@ public sealed class WeaponApplier
 		refreshing.Clear();
 		pendingRefreshes.Clear();
 		patternSeed = 1;
+		// Clients drop their generated skin materials on map change.
+		wearKeys.Clear();
 	}
 
 	public void Dispose()
 	{
 		Reset();
-		stickerWear.Clear();
+	}
+
+	private static string StickerSignature(int defIndex, WeaponEntry entry)
+	{
+		var parts = entry.Stickers
+			.OrderBy(sticker => sticker.Slot)
+			.Select(sticker => FormattableString.Invariant($"{sticker.Slot}:{sticker.Id}:{sticker.Schema}:{sticker.Wear}:{sticker.Rotation}:{sticker.OffsetX}:{sticker.OffsetY}"));
+		return defIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + string.Join("_", parts);
+	}
+
+	// PMM: CS2 clients cache generated skin materials by paint kit, seed and wear rounded to three decimals, for every
+	// weapon they see, and the cached material keeps the stickers it was first generated with. Every paint + seed + wear
+	// bucket is therefore claimed by one weapon and sticker layout; another layout moves to the nearest free 0.001 step.
+	// Claims are shared by all players and reset on map change, when clients clear the cache.
+	private sealed class WearKeys
+	{
+		private const int MaxBucket = 1000;
+		private readonly Dictionary<(int Paint, int Seed, int Bucket), string> claims = [];
+
+		public float Resolve(int paint, int seed, float wear, string signature)
+		{
+			var bucket = Bucket(wear);
+			for (var step = 0; step <= 2 * MaxBucket; step++)
+			{
+				var candidate = bucket + (step % 2 == 1 ? 1 : -1) * ((step + 1) / 2);
+				if (candidate is < 0 or > MaxBucket)
+					continue;
+				var key = (paint, seed, candidate);
+				if (claims.TryGetValue(key, out var owner) && owner != signature)
+					continue;
+				claims[key] = signature;
+				return candidate == bucket ? wear : InBucket(wear, candidate);
+			}
+			return wear;
+		}
+
+		public void Clear() => claims.Clear();
+
+		// The client prints the wear with "%.3f".
+		private static int Bucket(float wear) => (int)Math.Round(wear * 1000d, MidpointRounding.ToEven);
+
+		private static float InBucket(float wear, int bucket)
+		{
+			var shifted = (float)(wear + (bucket - Bucket(wear)) / 1000d);
+			return shifted >= 0f && Bucket(shifted) == bucket ? shifted : bucket / 1000f;
+		}
 	}
 }

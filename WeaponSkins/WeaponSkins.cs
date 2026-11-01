@@ -16,7 +16,7 @@ public sealed class WeaponSkins : BasePlugin, IPluginConfig<SkinsConfig>
     public static WeaponSkins? Instance { get; private set; }
 	public override string ModuleName => "WeaponSkins";
 	public override string ModuleAuthor => "✪ Stαr";
-	public override string ModuleVersion => "1.1.9";
+	public override string ModuleVersion => "1.2.0";
 	public override string ModuleDescription => "Gives players full control over how their loadout looks";
 
 	public SkinsConfig Config { get; set; } = new();

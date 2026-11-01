@@ -47,6 +47,7 @@ public sealed class Events
 		plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 		plugin.RegisterEventHandler<EventItemPickup>(OnItemPickup);
 		plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
+		plugin.RegisterEventHandler<EventRoundMvp>(OnRoundMvp, HookMode.Pre);
 		plugin.AddCommandListener("say", OnSay);
 		plugin.AddCommandListener("say_team", OnSay);
 		VirtualFunctions.GiveNamedItemFunc.Hook(OnGiveNamedItem, HookMode.Post);
@@ -378,6 +379,24 @@ public sealed class Events
 				plugin.EnsureLoadout(player.SteamID);
 		}
 
+		return HookResult.Continue;
+	}
+
+	// Every player hears the MVP anthem of the music kit named in round_mvp. Without this the event carries the kit of the
+	// player's own inventory (or the default one), not the kit chosen in WeaponSkins, so it is set here before the event is sent.
+	private HookResult OnRoundMvp(EventRoundMvp @event, GameEventInfo info)
+	{
+		var player = @event.Userid;
+		if (player == null || !player.IsValid || player.IsBot)
+			return HookResult.Continue;
+
+		var kit = plugin.Cache.Get(player)?.MusicKit ?? 0;
+		if (kit <= 0)
+			return HookResult.Continue;
+
+		plugin.Profile.ApplyMusic(player);
+		@event.Musickitid = kit;
+		@event.Nomusic = 0;
 		return HookResult.Continue;
 	}
 

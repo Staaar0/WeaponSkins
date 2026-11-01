@@ -208,37 +208,37 @@ public sealed class Commands
 
 	private void OnSkins(CCSPlayerController? caller, CommandInfo info)
 	{
-		if (Ready(caller) is { } player)
+		if (Ready(caller) is { } player && !WeaponSkinsApi.OpenExternal(player, "skins"))
 			plugin.Menus.OpenSkins(player);
 	}
 
 	private void OnKnife(CCSPlayerController? caller, CommandInfo info)
 	{
-		if (Ready(caller) is { } player)
+		if (Ready(caller) is { } player && !WeaponSkinsApi.OpenExternal(player, "knife"))
 			plugin.Menus.OpenKnife(player);
 	}
 
 	private void OnGloves(CCSPlayerController? caller, CommandInfo info)
 	{
-		if (Ready(caller) is { } player)
+		if (Ready(caller) is { } player && !WeaponSkinsApi.OpenExternal(player, "gloves"))
 			plugin.Menus.OpenGloves(player);
 	}
 
 	private void OnAgents(CCSPlayerController? caller, CommandInfo info)
 	{
-		if (Ready(caller) is { } player)
+		if (Ready(caller) is { } player && !WeaponSkinsApi.OpenExternal(player, "agents"))
 			plugin.Menus.OpenAgents(player);
 	}
 
 	private void OnMusic(CCSPlayerController? caller, CommandInfo info)
 	{
-		if (Ready(caller) is { } player)
+		if (Ready(caller) is { } player && !WeaponSkinsApi.OpenExternal(player, "music"))
 			plugin.Menus.OpenMusic(player);
 	}
 
 	private void OnPins(CCSPlayerController? caller, CommandInfo info)
 	{
-		if (Ready(caller) is { } player)
+		if (Ready(caller) is { } player && !WeaponSkinsApi.OpenExternal(player, "pins"))
 			plugin.Menus.OpenPins(player);
 	}
 
@@ -258,6 +258,9 @@ public sealed class Commands
 			plugin.Reply(player, "vip_only");
 			return;
 		}
+
+		if (WeaponSkinsApi.OpenExternal(player, "stickers"))
+			return;
 
 		var def = HeldWeapon(player, false);
 		if (def == 0)
