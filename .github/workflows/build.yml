@@ -3,7 +3,7 @@ name: WeaponSkins
 on:
   push:
     branches: [main, master]
-    ppaths-ignore:
+    paths-ignore:
       - readme.md
       - docs/**
   pull_request:
