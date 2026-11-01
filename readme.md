@@ -1,156 +1,169 @@
 # WeaponSkins
 
-A CSSharp plugin for CS2 that gives players full control over how their loadout looks.
+WeaponSkins is a [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp) plugin for customizing CS2 loadouts. Each player’s CT and T selections are saved in MySQL.
 
 ## Features
-- Optional Built-in Discord Bot for linking and changing skins via Discord
-- Weapon skins with float, pattern, nametag and StatTrak
-- Knife selector
-- Gloves selector
-- Agents selector
-- Music kit selector
-- Pins selector
-- Sticker menu with 4 slots per weapon (with optional **VIP-Only** option **OFF** by default) NOTE: !gen,!stickers share same VIP-Only optional setting
-- Gen apply a full custom craft up to 5 stickers with one command from [cs2inspects](https://cs2inspects.com/sticker-customizer)/[csfloat](https://csfloat.com/db)/[steam](https://steamcommunity.com/market/search?appid=730)/[cs2preview](https://cs2preview.com/craft) inspect link code
-- Auto skins update after game update
-- Everything is saved per player and per team in MySQL
 
-## Languages
-`en`, `pl`, `zh-CN`, `pt-BR`, `ru`, `es-ES`, `bg`, `cs`, `da`, `nl`, `fi`, `fr`, `de`, `el`, `hu`, `it`, `ja`, `ko`, `es-MX`, `no`, `pt-PT`, `ro`, `sv`, `zh-TW`, `tr`, `uk`, `vi`.
+- **Weapon skins:** Set wear (float), seed (pattern), name tags, and StatTrak.
+- **Loadout:** Choose knives, gloves, agents, music kits, and profile pins.
+- **Stickers:** Manage four slots per weapon. An optional, shared VIP restriction covers stickers and gen (off by default).
+- **Custom crafts:** Apply up to five stickers using inspect codes from [CS2Inspects](https://cs2inspects.com/sticker-customizer), [CSFloat](https://csfloat.com/db), [Steam](https://steamcommunity.com/market/search?appid=730), or [CS2Preview](https://cs2preview.com/craft).
+- **Automatic skin data updates** after CS2 updates.
+- **Discord:** Manage skins with the built-in bot, or use Discord-Utilities for linking only.
+- **Menus:** Built-in, MenuManagerCS2, or PanoramaMenuManagerCS2.
 
 ## Showcase
 
 <table>
 <tr>
 <td width="50%" align="center">
-<img src="docs/Knife_Gloves_Agents.gif" width="100%" alt="Knife,Gloves,Agents Showcase"><br>
-<strong>Knife,Gloves,Agents Showcase</strong>
+<img src="docs/Knife_Gloves_Agents.gif" width="100%" alt="Knife, gloves, and agents showcase"><br>
+<strong>Knives, Gloves &amp; Agents</strong>
 </td>
 <td width="50%" align="center">
-<img src="docs/Pin_Music.gif" width="100%" alt="Pin,Music Showcase"><br>
-<strong>Pin,Music Showcase</strong>
+<img src="docs/Pin_Music.gif" width="100%" alt="Pins and music kits showcase"><br>
+<strong>Pins &amp; Music Kits</strong>
 </td>
 </tr>
 <tr>
 <td width="50%" align="center">
-<img src="docs/Skins_Stickers.gif" width="100%" alt="Skins,Stickers Showcase"><br>
-<strong>Skins,Stickers Showcase</strong>
+<img src="docs/Skins_Stickers.gif" width="100%" alt="Weapon skins and stickers showcase"><br>
+<strong>Skins &amp; Stickers</strong>
 </td>
 <td width="50%" align="center">
-<img src="docs/Gen.gif" width="100%" alt="Gen Showcase"><br>
-<strong>Gen Showcase</strong>
+<img src="docs/Gen.gif" width="100%" alt="Gen craft showcase"><br>
+<strong>Custom Crafts (Gen)</strong>
 </td>
 </tr>
 </table>
 
 ## Requirements
 
-- CounterStrikeSharp v1.0.371 or newer
-- MySQL
-- Disable `FollowCS2ServerGuidelines` path: `addons/counterstrikesharp/configs/core.json`
+- **CounterStrikeSharp v1.0.371** or newer.
+- **MySQL** database.
+- Set `FollowCS2ServerGuidelines` to `false` in `addons/counterstrikesharp/configs/core.json`.
 
-## link system Options
-- Built-in Discord bot ``"discord_bot_token": "YOUR_BOT_TOKEN"`` For link system / everything can be changed via discord
-- [CS2-Discord-Utilities](https://github.com/NockyCZ/CS2-Discord-Utilities) For link system only / NO skins changes via discord
+## Installation
 
-## in-game plugin Install
+1. Download the latest build from [Releases](https://github.com/Staaar0/WeaponSkins/releases/latest).
+2. Extract it into `game/csgo/` on your server.
+3. Start the server once to generate `configs/plugins/WeaponSkins/WeaponSkins.json`.
+4. Enter your MySQL connection details in that file.
+5. Restart the server or load the plugin with `css_plugins load WeaponSkins`.
 
-1. Download the latest build from Releases
-2. Extract the zip into `game/csgo/`
-3. Start the server once, then fill the database settings in `configs/plugins/WeaponSkins/WeaponSkins.json`
-4. use `css_plugins load WeaponSkins` or Restart the server
-
-## Discord Bot Install
-
-1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and press ``New Application``
-2. Go to the ``Bot`` page and in the Privileged Gateway Intents allow ``Server Members Intent`` and ``Message Content Intent``
-3. Go to the ``OAuth2`` page in ``OAuth2 URL Generator`` check ``applications.commands`` and ``bot`` then in ``Bot Permissions`` check ``Administrator``
-4. Use ``Generated URL`` and paste it into your browser to invite the bot
-5. Go to ``Bot`` page in ``Token`` press ``Reset Token`` copy Bot Token and put it in ``"discord_bot_token": "YOUR_BOT_TOKEN",``
-
-## In-game Commands
+## In-game commands
 
 | Command | Description |
 | --- | --- |
-| `!ws` | Skins menu |
-| `!skins` | Skins menu |
-| `!knife` | Knife menu |
-| `!gloves` | Gloves menu |
-| `!agents` | Agents menu |
-| `!music` | Music kit menu |
-| `!pin` | Pins menu |
-| `!stickers` | Stickers menu |
-| `!wear` | Set weapon wear |
-| `!seed` | Set weapon seed |
-| `!st` | Toggle StatTrak |
-| `!g <code>` | Apply a gen code |
-| `!link` | Get a Discord link code |
-| `!cp` | Copies the held skin of the spectated player |
+| `!ws`, `!skins`, `!skin` | Open the skins menu. |
+| `!knife` | Open the knife menu. |
+| `!gloves` | Open the gloves menu. |
+| `!agents` | Open the agents menu. |
+| `!music` | Open the music kit menu. |
+| `!pin`, `!pins` | Open the pins menu. |
+| `!stickers` | Open the sticker menu. |
+| `!wear` | Set weapon wear (float). |
+| `!seed` | Set weapon seed (pattern). |
+| `!nametag` | Set a weapon name tag. |
+| `!st` | Toggle StatTrak. |
+| `!g <code>`, `!gen <code>` | Apply an inspect/gen code. |
+| `!link` | Get a code to link your Steam account to Discord. |
+| `!cp` | Copy the held weapon skin of the player you're spectating. |
 
-Command names can be changed in the config, except `!link`.
+Command aliases are configurable, **except `!link`**. See the default config for all aliases.
 
-## Discord Bot Commands
+## Menu styles
 
-| Command | What it does |
+Set `menu.Menu_Style` in `configs/plugins/WeaponSkins/WeaponSkins.json`:
+
+| Value | Menu |
 | --- | --- |
-| `/link CODE` | Links your Steam account with the code `!link` gave you in game |
-| `/unlink` | Removes the link |
-| `/me` | Shows which Steam account you are linked to |
-| `/skins` | Choose a team, category, weapon and skin |
-| `/knife` | Choose a team, knife and skin |
-| `/gloves` | Gloves and their skin |
-| `/agents` | Agent model |
-| `/music` | Music kit |
-| `/pins` | Profile pin |
-| `/stickers` | Select slots 1–4, search stickers, remove selected slots, or remove all stickers |
-| `/wear` `/seed` `/nametag` `/stattrak` | Change one thing on a weapon you already skinned |
-| `/gen CODE` | Apply a full craft from an inspect code |
-| `/loadout` | Everything you have equipped |
+| `1` | Built-in menu (**default**). |
+| `2` | [MenuManagerCS2](https://github.com/NickFox007/MenuManagerCS2) by NickFox007. |
+| `3` | [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) by RRimmer. |
 
-## Menu Style
-
-- Optional Menu Style
-
-Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
-
-```json
-"Menu_Style":
-```
-- Options
-
-1. Built-in (Default)
-2. [MenuManagerCS2](https://github.com/NickFox007/MenuManagerCS2) By: `NickFox007`
-3. [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) By: `RRimmer`
+For a custom Panorama interface, see [PMM_WeaponSkins](https://github.com/Staaar0/PMM_WeaponSkins).
 
 <table>
 <tr>
 <td width="50%" align="center">
-<img src="docs/Built-in.png" width="100%" alt="Built-in Showcase"><br>
-<strong>Built-in Showcase</strong>
+<img src="docs/Built-in.png" width="100%" alt="Built-in menu"><br>
+<strong>Built-in</strong>
 </td>
 <td width="50%" align="center">
-<img src="docs/MenuManager.png" width="100%" alt="NickFox-MenuManager Menu Showcase"><br>
-<strong>NickFox-MenuManager Showcase</strong>
+<img src="docs/MenuManager.png" width="100%" alt="MenuManagerCS2 menu"><br>
+<strong>MenuManagerCS2</strong>
 </td>
 </tr>
 <tr>
 <td width="50%" align="center">
-<img src="docs/PanoramaMenu.png" width="100%" alt="RRimmer-PanoramaMenu Showcase"><br>
-<strong>RRimmer-PanoramaMenu Showcase</strong>
+<img src="docs/PanoramaMenu.png" width="100%" alt="PanoramaMenuManagerCS2 menu"><br>
+<strong>PanoramaMenuManagerCS2</strong>
 </td>
 <td width="50%" align="center">
-<img src="docs/WeaponSkins.png" width="100%" alt="PMM_WeaponSkins Showcase"><br>
-<strong>PMM_WeaponSkins Showcase</strong>
+<img src="docs/WeaponSkins.png" width="100%" alt="PMM WeaponSkins custom UI"><br>
+<strong>PMM_WeaponSkins</strong>
 </td>
 </tr>
 </table>
 
-## PMM_WeaponSkins
+## Discord integration
 
-- For those who use [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) and want custom panorama UI.
-- Check [PMM_WeaponSkins](https://github.com/Staaar0/PMM_WeaponSkins)
+Two linking methods are available. **Restart or reload WeaponSkins after switching.**
 
-## Default Config
+### Option 1: Built-in Discord bot
+
+The built-in bot supports Steam linking and skin changes through Discord. Set these fields in `WeaponSkins.json`:
+
+```json
+"discord_bot_token": "YOUR_BOT_TOKEN",
+"linking_method": "1",
+"link_required": true,
+"discord_link": "https://discord.gg/yourserver"
+```
+
+With `link_required: true`, players must link before using skin commands; `false` makes linking optional. Restart once to create the linking tables. The bot starts and stops with the server.
+
+**Set up the bot:**
+
+1. Create an app in the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Under **Bot → Privileged Gateway Intents**, enable **Server Members Intent** and **Message Content Intent**.
+3. Under **OAuth2 → URL Generator**, select `applications.commands`, `bot`, and the **Administrator** permission.
+4. Use the generated URL to invite the bot.
+5. Copy or reset the **Bot** token and enter it as `discord_bot_token`.
+
+**Discord bot commands**
+
+| Command | Description |
+| --- | --- |
+| `/link CODE` | Link your Steam account using the code from `!link` in game. |
+| `/unlink` | Unlink your Steam account. |
+| `/me` | Show your linked Steam account. |
+| `/skins` | Choose a team, weapon category, weapon, and skin. |
+| `/knife` | Select a team, knife, and skin. |
+| `/gloves` | Choose gloves and their skin. |
+| `/agents` | Select an agent. |
+| `/music` | Select a music kit. |
+| `/pins` | Select a profile pin. |
+| `/stickers` | Search for stickers, edit slots 1–4, or remove selected/all stickers. |
+| `/wear`, `/seed`, `/nametag`, `/stattrak` | Edit an already-equipped weapon skin. |
+| `/gen CODE` | Apply a complete craft from an inspect code. |
+| `/loadout` | View your equipped loadout. |
+
+### Option 2: Discord-Utilities
+
+To use [CS2-Discord-Utilities](https://github.com/NockyCZ/CS2-Discord-Utilities) for **account linking only**, set:
+
+```json
+"linking_method": "2"
+```
+
+WeaponSkins uses Discord-Utilities for linking and ignores its own `discord_bot_token`, `link_required`, and `discord_link` settings. Discord skin changes are not available in this mode.
+
+## Default configuration
+
+File: `configs/plugins/WeaponSkins/WeaponSkins.json`
+
 ```json
 {
   "ConfigVersion": 7,
@@ -167,8 +180,8 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
     "name": "",
     "ssl_mode": "Preferred"
   },
-  "discord_bot_token": "YOUR_BOT_TOKEN", // Discord bot will start/stop with cs2 server
-  "linking_method": "1", // link options 1=WeaponSkinsBOT 2=Discord-Utilities
+  "discord_bot_token": "YOUR_BOT_TOKEN",
+  "linking_method": "1",
   "link_required": false,
   "discord_link": "https://discord.gg/yourserver",
   "stickers": {
@@ -180,7 +193,7 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
     "change_cooldown": 5
   },
   "menu": {
-    "Menu_Style": 1, // 1=Built-in 2=NickFox-MenuManager 3=RRimmer-PanoramaMenu
+    "Menu_Style": 1,
     "freeze_player": false,
     "items_per_page": 4,
     "show_image": true,
@@ -195,95 +208,31 @@ Config path: `configs/plugins/WeaponSkins/WeaponSkins.json`
     "vip_flag": "@css/vip"
   },
   "commands": {
-    "skins": [
-      "ws",
-      "skins",
-      "skin"
-    ],
-    "knife": [
-      "knife",
-      "knives"
-    ],
-    "gloves": [
-      "gloves",
-      "glove"
-    ],
-    "agents": [
-      "agents",
-      "agent"
-    ],
-    "music": [
-      "music",
-      "mk"
-    ],
-    "pins": [
-      "pins",
-      "pin"
-    ],
-    "stickers": [
-      "stickers",
-      "sticker"
-    ],
-    "nametag": [
-      "nametag",
-      "tag"
-    ],
-    "stattrak": [
-      "stattrak",
-      "st"
-    ],
-    "wear": [
-      "wear",
-      "float"
-    ],
-    "seed": [
-      "seed",
-      "pattern"
-    ],
-    "gen": [
-      "g",
-      "gen"
-    ],
-    "copy": [
-      "cp",
-      "copy"
-    ],
-    "reload": [
-      "ws_reload"
-    ]
+    "skins": ["ws", "skins", "skin"],
+    "knife": ["knife", "knives"],
+    "gloves": ["gloves", "glove"],
+    "agents": ["agents", "agent"],
+    "music": ["music", "mk"],
+    "pins": ["pins", "pin"],
+    "stickers": ["stickers", "sticker"],
+    "nametag": ["nametag", "tag"],
+    "stattrak": ["stattrak", "st"],
+    "wear": ["wear", "float"],
+    "seed": ["seed", "pattern"],
+    "gen": ["g", "gen"],
+    "copy": ["cp", "copy"],
+    "reload": ["ws_reload"]
   }
 }
 ```
-## Discord Bots
-- **[very important]** if you used one of the linking methods and want to change. after the change Restart or reload WeaponSkins.
-### To use Built-in Discord Bot use the following config
-In `WeaponSkins.json`:
 
-```json
-"discord_bot_token": "YOUR_BOT_TOKEN",
-"linking_method": "1",
-"link_required": true,
-"discord_link": "https://discord.gg/yourserver"
-```
+`stickers.vip_only` covers stickers and gen. Use `vip_commands` for other VIP-only commands.
 
-Restart the server once so the plugin creates the linking tables.
+## Supported languages
 
-With `link_required` on, skin commands are blocked until the player links.
+`en`, `pl`, `zh-CN`, `pt-BR`, `ru`, `es-ES`, `bg`, `cs`, `da`, `nl`, `fi`, `fr`, `de`, `el`, `hu`, `it`, `ja`, `ko`, `es-MX`, `no`, `pt-PT`, `ro`, `sv`, `zh-TW`, `tr`, `uk`, `vi`.
 
-### To use Discord-Utilities use the following config
-In `WeaponSkins.json`:
+## Inspect link notes
 
-```json
-"linking_method": "2",
-```
-Those options will be ignored even if they are configured
-```json
-"discord_bot_token": "YOUR_BOT_TOKEN"
-"link_required": true,
-"discord_link": "https://discord.gg/yourserver"
-```
-because WeaponSkins will use [CS2-Discord-Utilities](https://github.com/NockyCZ/CS2-Discord-Utilities) config
-
-## NOTES:
-- in-game inspect links from [csfloat](https://csfloat.com/db) and [steam](https://steamcommunity.com/market/search?appid=730) does work but the inspects links contain `//` if you want to ues inspect links from both you must remove one of the `//` = `/`
-- full inspect links work with or without `//` with WeaponSkins built-in discord bot with !gen command
+- For in-game inspect links from **CSFloat** or **Steam**, replace `//` with `/`.
+- The built-in Discord bot accepts full inspect links with or without `//`.
