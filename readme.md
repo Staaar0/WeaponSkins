@@ -286,4 +286,4 @@ because WeaponSkins will use [CS2-Discord-Utilities](https://github.com/NockyCZ/
 
 ## NOTES:
 - in-game inspect links from [csfloat](https://csfloat.com/db) and [steam](https://steamcommunity.com/market/search?appid=730) does work but the inspects links contain `//` if you want to ues inspect links from both you must remove one of the `//` = `/`
-- full inspect links work with or without `//` with WeaponSkins built-in discord bot with !gen command
+- full inspect links work with or without `//` with WeaponSkins built-in discord bot with !gen command.
