@@ -660,6 +660,55 @@ public static class WeaponSkinsApi
 		return null;
 	}
 
+	/// <summary>
+	/// Puts the player's own skin (paint, wear, pattern, StatTrak, name tag, stickers, charm) on a weapon the player
+	/// holds, e.g. one picked up from another player. It goes through the same WeaponApplier.Apply as a bought weapon.
+	/// When the player has no skin for that weapon, the weapon is cleared, so it does not keep the previous owner's skin.
+	/// Knives are left alone: WeaponSkins already re-applies them on pickup. weaponHandle = weapon.EntityHandle.Raw.
+	/// </summary>
+	public static string? ApplyToWeapon(CCSPlayerController player, uint weaponHandle)
+	{
+		var error = Check(player, out var plugin, out var loadout);
+		if (error != null)
+			return error;
+
+		var weapon = new CHandle<CBasePlayerWeapon>(weaponHandle).Value;
+		var pawn = player.PlayerPawn.Value;
+		var owner = weapon?.OwnerEntity.Value;
+		if (weapon == null || !weapon.IsValid || pawn == null || !pawn.IsValid || owner == null || !owner.IsValid ||
+			owner.EntityHandle.Raw != pawn.EntityHandle.Raw)
+			return "invalid";
+		if (KnifeService.IsKnifeClass(weapon.DesignerName))
+			return null;
+
+		var item = weapon.AttributeManager.Item;
+		if (item.Handle == IntPtr.Zero)
+			return "invalid";
+
+		var defIndex = (int)item.ItemDefinitionIndex;
+		loadout.For(player.Team).Weapons.TryGetValue(defIndex, out var entry);
+		if (entry == null || entry.Paint <= 0)
+		{
+			item.AttributeList.Attributes.RemoveAll();
+			item.NetworkedDynamicAttributes.Attributes.RemoveAll();
+			item.CustomName = "";
+			item.EntityQuality = 0;
+			weapon.FallbackPaintKit = 0;
+			weapon.FallbackSeed = 0;
+			weapon.FallbackWear = 0f;
+			weapon.FallbackStatTrak = -1;
+			item.Initialized = true;
+		}
+		else
+		{
+			plugin.Applier.Apply(player, weapon);
+		}
+
+		if (pawn.WeaponServices?.ActiveWeapon.Value is { IsValid: true } active && active.EntityHandle.Raw == weaponHandle)
+			plugin.Applier.RefreshViewModel(player);
+		return null;
+	}
+
 	/// <summary>Selects a pin / collectible (0 = none).</summary>
 	public static string? SavePin(CCSPlayerController player, int pin)
 	{
