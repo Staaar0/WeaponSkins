@@ -378,9 +378,12 @@ public sealed class CatalogService
 				var tournamentEvent = ReadString(sticker, "tournament_event");
 				var tournamentPlayer = ReadString(sticker, "tournament_player");
 				var tournamentKey = "";
+				var tournamentId = 0;
 				if (sticker.TryGetProperty("tournament", out var tournament) && tournament.ValueKind == JsonValueKind.Object)
 				{
 					tournamentKey = CatalogNames.StickerTournamentKey(tournament);
+					if (tournament.TryGetProperty("id", out var tournamentNumber) && tournamentNumber.ValueKind == JsonValueKind.Number)
+						tournamentNumber.TryGetInt32(out tournamentId);
 					if (tournamentEvent.Length == 0)
 						tournamentEvent = ReadString(tournament, "name");
 					if (tournamentEvent.Length == 0)
@@ -412,13 +415,36 @@ public sealed class CatalogService
 				var sourceKey = sticker.TryGetProperty("original", out var original) && original.ValueKind == JsonValueKind.Object
 					? ReadString(original, "image_inventory") : "";
 				stickers.Add(new StickerDef(id, name, tournamentEvent, tournamentPlayer, capsule, kind,
-					ReadString(sticker, "effect"), sourceKey, crateId, tournamentKey));
+					ReadString(sticker, "effect"), sourceKey, crateId, tournamentKey, tournamentId));
 				names[id] = name;
 			}
 
+			NameNewMajors(stickers);
 			stickers.Sort((a, b) => a.Id.CompareTo(b.Id));
 			Stickers = stickers;
 			StickerNames = names;
+		}
+	}
+
+	private static void NameNewMajors(List<StickerDef> stickers)
+	{
+		var shortNames = stickers
+			.Where(sticker => sticker.TournamentId > 0 && sticker.TournamentKey.Length == 0)
+			.GroupBy(sticker => sticker.TournamentId)
+			.Select(major => (Id: major.Key, Name: major
+				.Select(sticker => sticker.Name.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+				.Where(parts => parts.Length >= 2 && parts[^1].Split(' ').Any(word => word.Length == 4 && word.All(char.IsAsciiDigit)))
+				.GroupBy(parts => parts[^1])
+				.OrderByDescending(names => names.Count())
+				.Select(names => names.Key)
+				.FirstOrDefault()))
+			.Where(major => major.Name != null)
+			.ToDictionary(major => major.Id, major => major.Name!);
+
+		for (var i = 0; i < stickers.Count; i++)
+		{
+			if (stickers[i].TournamentKey.Length == 0 && shortNames.TryGetValue(stickers[i].TournamentId, out var shortName))
+				stickers[i] = stickers[i] with { TournamentKey = shortName };
 		}
 	}
 

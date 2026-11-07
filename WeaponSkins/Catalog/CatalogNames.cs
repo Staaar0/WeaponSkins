@@ -82,7 +82,7 @@ internal static class CatalogNames
 			24 => "Austin 2025",
 			25 => "Budapest 2025",
 			26 => "Cologne 2026",
-			_ => ReadString(tournament, "name")
+			_ => ""
 		};
 	}
 

@@ -1103,7 +1103,7 @@ public sealed class SkinMenus
 
 			browser.Groups[source] = byGroup.Keys
 				.Where(group => group.Length > 0)
-				.OrderBy(group => StickerGroupOrder(source, group))
+				.OrderBy(group => StickerGroupOrder(source, group, byGroup[group]))
 				.ThenBy(group => group, StringComparer.OrdinalIgnoreCase)
 				.ToList();
 
@@ -1558,8 +1558,15 @@ public sealed class SkinMenus
 		return subject.Trim();
 	}
 
-	private static int StickerGroupOrder(string source, string group)
+	private static int StickerGroupOrder(string source, string group, List<StickerMenuEntry> entries)
 	{
+		if (source == "Major Stickers")
+		{
+			var newest = entries.Max(entry => entry.Sticker.TournamentId);
+			if (newest > 0)
+				return -newest;
+		}
+
 		var groups = source switch
 		{
 			"Major Stickers" => MajorStickerEvents,

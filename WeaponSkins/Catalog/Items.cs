@@ -11,7 +11,7 @@ public sealed record CharmDef(int Id, string Name);
 public sealed record MusicDef(int Id, string Name, string Image);
 
 public sealed record StickerDef(int Id, string Name, string TournamentEvent, string TournamentPlayer, string Capsule, string Kind,
-	string Effect = "", string SourceKey = "", string CrateId = "", string TournamentKey = "");
+	string Effect = "", string SourceKey = "", string CrateId = "", string TournamentKey = "", int TournamentId = 0);
 public sealed record AgentDef(string Model, string Name, CsTeam Team, string Faction, string Image);
 public sealed record PinDef(int Id, string Name, string Group, string Image);
 
