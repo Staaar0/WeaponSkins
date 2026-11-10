@@ -106,7 +106,7 @@ Set `menu.Menu_Style` in `configs/plugins/WeaponSkins/WeaponSkins.json`:
 <tr>
 <td width="50%" align="center">
 <img src="docs/PMM_WeaponSkins-1.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
-<strong>Skins/Agents Preview</strong>
+<strong>Loadout Preview</strong>
 </td>
 <td width="50%" align="center">
 <img src="docs/PMM_WeaponSkins-2.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
