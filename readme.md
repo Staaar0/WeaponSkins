@@ -105,12 +105,18 @@ Set `menu.Menu_Style` in `configs/plugins/WeaponSkins/WeaponSkins.json`:
 <table>
 <tr>
 <td width="50%" align="center">
-<img src="docs/PMM_WeaponSkins-1.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
-<strong>Loadout Preview</strong>
+<img src="docs/PMM_WeaponSkins-1.png" width="100%" alt="PMM_WeaponSkins By RRimmer"><br>
+<strong>inventory Preview</strong>
 </td>
 <td width="50%" align="center">
-<img src="docs/PMM_WeaponSkins-2.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
+<img src="docs/PMM_WeaponSkins-2.png" width="100%" alt="PMM_WeaponSkins By RRimmer"><br>
 <strong>Stickers Preview</strong>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center">
+<img src="docs/PMM_WeaponSkins-3.png" width="100%" alt="PMM_WeaponSkins By RRimmer"><br>
+<strong>Charm Preview</strong>
 </td>
 </tr>
 </table>
