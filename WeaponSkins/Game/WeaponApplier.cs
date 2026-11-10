@@ -1,3 +1,4 @@
+using System.Text;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Timers;
@@ -11,6 +12,10 @@ public sealed class WeaponApplier
 
 	private const int GlockDefIndex = 4;
 
+	private const int MaxNameTagBytes = 160;
+
+	private const int SkinnedForPruneAt = 1024;
+
 
 	private readonly WeaponSkins plugin;
 	private readonly PlayerCache cache;
@@ -22,6 +27,9 @@ public sealed class WeaponApplier
 	private readonly Dictionary<int, List<string?>> pendingRefreshes = [];
 	private readonly Dictionary<int, int> lifeRevisions = [];
 	private readonly Dictionary<int, int> activeRefreshRevisions = [];
+	private readonly Dictionary<uint, SkinOwner> skinnedFor = [];
+	private readonly HashSet<uint> regiveRequested = [];
+	private int skinnedForPruneAt = SkinnedForPruneAt;
 	private int patternSeed = 1;
 	private int mapGeneration;
 	private int nextRefreshRevision;
@@ -40,6 +48,8 @@ public sealed class WeaponApplier
 		string NameTag,
 		float RenderWear,
 		int StickerHash);
+
+	internal readonly record struct SkinOwner(ulong SteamId, CsTeam Team);
 
 	private readonly record struct RefreshContext(
 		int Slot,
@@ -73,6 +83,7 @@ public sealed class WeaponApplier
 
 		var defIndex = (int)item.ItemDefinitionIndex;
 		var isKnife = KnifeService.IsKnifeClass(weapon.DesignerName);
+		RememberSkinOwner(weapon.EntityHandle.Raw, player);
 
 		if (isKnife)
 		{
@@ -184,7 +195,7 @@ public sealed class WeaponApplier
 		item.AttributeList.Attributes.RemoveAll();
 		item.NetworkedDynamicAttributes.Attributes.RemoveAll();
 		EconAttributes.MarkCustom(item, player.SteamID);
-		item.CustomName = entry.NameTag ?? "";
+		item.CustomName = FitNameTag(entry.NameTag);
 		item.EntityQuality = isKnife ? 3 : entry.StatTrak >= 0 ? 9 : 0;
 		ApplyPaintAttributes(item, entry.Paint, seed, wear);
 
@@ -365,19 +376,121 @@ public sealed class WeaponApplier
 
 	public void ApplyInventory(CCSPlayerController player)
 	{
-		if (!player.IsValid || !player.PawnIsAlive || cache.Get(player) == null)
+		Sweep(player, true);
+	}
+
+	public void RegiveCarried(CCSPlayerController player)
+	{
+		Sweep(player, false);
+	}
+
+	private void Sweep(CCSPlayerController player, bool applyOthers)
+	{
+		var loadout = cache.Get(player);
+		if (!player.IsValid || !player.PawnIsAlive || loadout == null)
 			return;
 
 		var weapons = player.PlayerPawn.Value?.WeaponServices?.MyWeapons;
 		if (weapons == null)
 			return;
 
+		var side = loadout.For(player.Team);
+		var busy = refreshing.Contains(player.Slot);
+		HashSet<string>? regive = null;
 		foreach (var handle in weapons)
 		{
 			var weapon = handle.Value;
-			if (weapon != null && weapon.IsValid)
-				Apply(player, weapon);
+			if (weapon == null || !weapon.IsValid)
+				continue;
+
+			var slot = RegiveSlot(player, side, weapon);
+			if (slot == null)
+			{
+				if (applyOthers)
+					Apply(player, weapon);
+				continue;
+			}
+
+			var weaponHandle = weapon.EntityHandle.Raw;
+			if (busy && regiveRequested.Contains(weaponHandle))
+				continue;
+
+			regiveRequested.Add(weaponHandle);
+			(regive ??= []).Add(slot);
 		}
+
+		if (regive != null)
+			RefreshAll(player, regive.Count == 1 ? regive.First() : null, restoreActiveSlot: true);
+	}
+
+	private string? RegiveSlot(CCSPlayerController player, TeamLoadout side, CBasePlayerWeapon weapon)
+	{
+		var item = weapon.AttributeManager.Item;
+		if (item.Handle == IntPtr.Zero || !skinnedFor.TryGetValue(weapon.EntityHandle.Raw, out var skinned))
+			return null;
+
+		var isKnife = KnifeService.IsKnifeClass(weapon.DesignerName);
+		var slot = isKnife ? "slot3" : GetSlotCommand(weapon);
+		if (!isKnife && slot is not ("slot1" or "slot2"))
+			return null;
+
+		var defIndex = (int)item.ItemDefinitionIndex;
+		var wantedDef = WantedDef(side.Knife, player.Team, isKnife, defIndex);
+		var wantedPaint = (!isKnife || side.Knife > 0) && side.Weapons.TryGetValue(wantedDef, out var entry)
+			? Math.Max(entry.Paint, 0)
+			: 0;
+
+		return CarriesOtherLook(skinned, player.SteamID, player.Team, isKnife,
+			defIndex, Math.Max(weapon.FallbackPaintKit, 0), wantedDef, wantedPaint) ? slot : null;
+	}
+
+	internal static int WantedDef(int chosenKnife, CsTeam team, bool isKnife, int defIndex)
+	{
+		if (!isKnife)
+			return defIndex;
+		if (chosenKnife > 0)
+			return chosenKnife;
+		return defIndex is 42 or 59 ? defIndex : KnifeService.DefaultDef(team);
+	}
+
+	internal static bool CarriesOtherLook(SkinOwner skinned, ulong steamId, CsTeam team, bool isKnife,
+		int defIndex, int paint, int wantedDef, int wantedPaint)
+	{
+		if (skinned.SteamId == steamId && skinned.Team == team)
+			return false;
+
+		if (isKnife)
+			return defIndex != wantedDef || paint != wantedPaint;
+
+		return skinned.SteamId == steamId && paint != wantedPaint;
+	}
+
+	private void RememberSkinOwner(uint weaponHandle, CCSPlayerController player)
+	{
+		if (skinnedFor.Count >= skinnedForPruneAt)
+		{
+			foreach (var handle in skinnedFor.Keys.Where(handle => ResolveWeapon(handle) == null).ToList())
+				skinnedFor.Remove(handle);
+
+			regiveRequested.RemoveWhere(handle => !skinnedFor.ContainsKey(handle));
+			skinnedForPruneAt = Math.Max(SkinnedForPruneAt, skinnedFor.Count * 2);
+		}
+
+		skinnedFor[weaponHandle] = new SkinOwner(player.SteamID, player.Team);
+	}
+
+	internal static string FitNameTag(string? nameTag)
+	{
+		if (string.IsNullOrEmpty(nameTag))
+			return "";
+
+		var length = nameTag.Length;
+		while (length > 0 && Encoding.UTF8.GetByteCount(nameTag.AsSpan(0, length)) > MaxNameTagBytes)
+			length--;
+		if (length > 0 && length < nameTag.Length && char.IsHighSurrogate(nameTag[length - 1]))
+			length--;
+
+		return length == nameTag.Length ? nameTag : nameTag[..length];
 	}
 
 	public bool IsRefreshing(int slot) => refreshing.Contains(slot);
@@ -395,7 +508,8 @@ public sealed class WeaponApplier
 			player.ExecuteClientCommand(slotCommand);
 	}
 
-	public void RefreshAll(CCSPlayerController player, string? slotCommand = null, bool includeKnife = false)
+	public void RefreshAll(CCSPlayerController player, string? slotCommand = null, bool includeKnife = false,
+		bool restoreActiveSlot = false)
 	{
 		var loadout = cache.Get(player);
 		if (!player.IsValid || !player.PawnIsAlive || loadout == null)
@@ -428,7 +542,9 @@ public sealed class WeaponApplier
 		}
 
 		var context = BeginRefresh(player, pawn);
-		var restoreSlotCommand = slotCommand ?? GetSlotCommand(pawn.WeaponServices?.ActiveWeapon.Value);
+		var activeSlotCommand = GetSlotCommand(pawn.WeaponServices?.ActiveWeapon.Value);
+		var restoreSlotCommand = restoreActiveSlot ? activeSlotCommand ?? slotCommand : slotCommand ?? activeSlotCommand;
+		var restoreAlways = restoreActiveSlot && restoreSlotCommand is ("slot1" or "slot2");
 		var hasKnife = false;
 		List<uint> weaponsToKill = [];
 		Dictionary<string, List<(int Clip, int Reserve)>> weaponsWithAmmo = [];
@@ -593,7 +709,7 @@ public sealed class WeaponApplier
 
 			GiveReplacements();
 
-			RestoreActiveWeaponSlot(context, restoreSlotCommand);
+			RestoreActiveWeaponSlot(context, restoreSlotCommand, restoreAlways);
 			plugin.AddTimer(0.12f, () => CompleteRefresh(context), TimerFlags.STOP_ON_MAPCHANGE);
 		}, TimerFlags.STOP_ON_MAPCHANGE);
 	}
@@ -691,7 +807,7 @@ public sealed class WeaponApplier
 		return null;
 	}
 
-	private void RestoreActiveWeaponSlot(RefreshContext context, string? slotCommand)
+	private void RestoreActiveWeaponSlot(RefreshContext context, string? slotCommand, bool always = false)
 	{
 		if (slotCommand == null)
 			return;
@@ -703,7 +819,7 @@ public sealed class WeaponApplier
 				return;
 
 			var active = player.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
-			if (GetSlotCommand(active) == slotCommand)
+			if (!always && GetSlotCommand(active) == slotCommand)
 				return;
 
 			player.ExecuteClientCommand(slotCommand);
@@ -859,6 +975,9 @@ public sealed class WeaponApplier
 		activeRefreshRevisions.Clear();
 		refreshing.Clear();
 		pendingRefreshes.Clear();
+		skinnedFor.Clear();
+		regiveRequested.Clear();
+		skinnedForPruneAt = SkinnedForPruneAt;
 		patternSeed = 1;
 		// Clients drop their generated skin materials on map change.
 		wearKeys.Clear();
@@ -911,7 +1030,7 @@ public sealed class WeaponApplier
 		private static float InBucket(float wear, int bucket)
 		{
 			var shifted = (float)(wear + (bucket - Bucket(wear)) / 1000d);
-			return shifted >= 0f && Bucket(shifted) == bucket ? shifted : bucket / 1000f;
+			return shifted >= 0f && shifted <= 1f && Bucket(shifted) == bucket ? shifted : bucket / 1000f;
 		}
 	}
 }

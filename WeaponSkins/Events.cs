@@ -160,8 +160,11 @@ public sealed class Events
 			Server.NextWorldUpdate(() =>
 			{
 				var current = spawnRef.Resolve();
-				if (current != null)
-					plugin.Applier.SyncSpawnViewModel(current);
+				if (current == null)
+					return;
+
+				plugin.Applier.RegiveCarried(current);
+				plugin.Applier.SyncSpawnViewModel(current);
 			});
 		}
 		else
