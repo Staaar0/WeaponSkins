@@ -82,7 +82,7 @@ Set `menu.Menu_Style` in `configs/plugins/WeaponSkins/WeaponSkins.json`:
 | `2` | [MenuManagerCS2](https://github.com/NickFox007/MenuManagerCS2) by NickFox007. |
 | `3` | [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) by RRimmer. |
 
-For a custom Panorama interface, see [PMM_WeaponSkins By RRimmer.](https://github.com/RRimmer/PMM_WeaponSkins).
+### For a custom Panorama interface, see [PMM_WeaponSkins By RRimmer.](https://github.com/RRimmer/PMM_WeaponSkins).
 
 <table>
 <tr>
