@@ -82,8 +82,6 @@ Set `menu.Menu_Style` in `configs/plugins/WeaponSkins/WeaponSkins.json`:
 | `2` | [MenuManagerCS2](https://github.com/NickFox007/MenuManagerCS2) by NickFox007. |
 | `3` | [PanoramaMenuManagerCS2](https://github.com/RRimmer/PanoramaMenuManagerCS2) by RRimmer. |
 
-### For a custom Panorama interface, see [PMM_WeaponSkins By RRimmer.](https://github.com/RRimmer/PMM_WeaponSkins).
-
 <table>
 <tr>
 <td width="50%" align="center">
@@ -100,9 +98,19 @@ Set `menu.Menu_Style` in `configs/plugins/WeaponSkins/WeaponSkins.json`:
 <img src="docs/PanoramaMenu.png" width="100%" alt="PanoramaMenuManagerCS2 menu"><br>
 <strong>PanoramaMenuManagerCS2</strong>
 </td>
+</tr>
+</table>
+
+### Custom Panorama Menu, [PMM_WeaponSkins](https://github.com/RRimmer/PMM_WeaponSkins) By RRimmer.
+<table>
+<tr>
 <td width="50%" align="center">
-<img src="docs/pmm_weaponskins_0.1.1.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
-<strong>PMM_WeaponSkins By RRimmer</strong>
+<img src="docs/PMM_WeaponSkins-1.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
+<strong>Loadout Preview</strong>
+</td>
+<td width="50%" align="center">
+<img src="docs/PMM_WeaponSkins-2.png" width="100%" alt="PMM_WeaponSkins By RRimmer custom UI"><br>
+<strong>Stickers Preview</strong>
 </td>
 </tr>
 </table>
